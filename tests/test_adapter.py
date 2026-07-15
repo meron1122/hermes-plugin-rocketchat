@@ -274,6 +274,13 @@ class TestAdapterInit:
         adapter = _make_adapter({"reply_mode": "thread"})
         assert adapter._reply_mode == "thread"
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("is_reconnect", [False, True])
+    async def test_connect_accepts_reconnect_flag(self, is_reconnect):
+        adapter = RocketchatAdapter(PlatformConfig(enabled=True, extra={}))
+
+        assert await adapter.connect(is_reconnect=is_reconnect) is False
+
 
 # ---------------------------------------------------------------------------
 # format_message

@@ -133,8 +133,13 @@ class RocketchatAdapter(
     # Required overrides
     # ------------------------------------------------------------------
 
-    async def connect(self) -> bool:
-        """Connect to Rocket.Chat and start the DDP listener."""
+    async def connect(self, *, is_reconnect: bool = False) -> bool:
+        """Connect to Rocket.Chat and start the DDP listener.
+
+        Rocket.Chat's DDP stream has no server-side update queue whose startup
+        policy depends on ``is_reconnect``.  The argument is accepted to match
+        the current Hermes platform-adapter contract.
+        """
         import aiohttp
 
         if not self._base_url or not self._token or not self._bot_user_id:
