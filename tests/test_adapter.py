@@ -6,6 +6,7 @@ command routing).
 """
 
 import importlib.util
+import json
 import os
 import sys
 from pathlib import Path
@@ -554,3 +555,189 @@ class TestHandleMessage:
         adapter.handle_message.assert_awaited_once()
         event = adapter.handle_message.await_args[0][0]
         assert event.message_type == MessageType.TEXT
+
+
+# ---------------------------------------------------------------------------
+# Thread context
+# ---------------------------------------------------------------------------
+
+
+class TestThreadContext:
+    def test_no_session_store_means_no_session(self):
+        adapter = _make_adapter()
+        assert (
+            adapter._has_active_session_for_thread("r1", "channel", "t1", "u1")
+            is False
+        )
+
+    @pytest.mark.asyncio
+    async def test_fetch_formats_parent_and_replies(self, monkeypatch):
+        monkeypatch.setenv("ROCKETCHAT_ALLOWED_USERS", "u1")
+        adapter = _make_adapter()
+
+        async def fake_get(path, params=None):
+            if path == "chat.getMessage":
+                return {"message": {
+                    "_id": "t1", "msg": "parent text", "ts": "1",
+                    "u": {"_id": "u1", "username": "alice"},
+                }}
+            assert params["tmid"] == "t1"
+            return {"messages": [
+                {"_id": "m3", "msg": "@hermesbot help", "ts": "3",
+                 "u": {"_id": "u1", "username": "alice"}},  # triggering message
+                {"_id": "m2", "msg": "reply one", "ts": "2",
+                 "u": {"_id": "u2", "username": "bob"}},
+                {"_id": "mB", "msg": "own reply", "ts": "2.5",
+                 "u": {"_id": "bot_uid", "username": "hermesbot"}},
+            ]}
+
+        adapter._api_get = fake_get
+        ctx = await adapter._fetch_thread_context("t1", "m3")
+        assert "[thread parent] alice: parent text" in ctx
+        assert "[unverified] bob: reply one" in ctx
+        assert "own reply" not in ctx  # bot's own replies skipped
+        assert "help" not in ctx  # triggering message excluded
+        assert ctx.endswith("\n\n")
+
+    @pytest.mark.asyncio
+    async def test_fetch_failure_returns_empty(self):
+        adapter = _make_adapter()
+        adapter._api_get = AsyncMock(side_effect=RuntimeError("boom"))
+        assert await adapter._fetch_thread_context("t1", "m1") == ""
+
+    @pytest.mark.asyncio
+    async def test_injected_on_first_thread_turn(self):
+        adapter = _wired_adapter(room_type="channel")
+        adapter._has_active_session_for_thread = MagicMock(return_value=False)
+        adapter._fetch_thread_context = AsyncMock(
+            return_value="[Thread context]\nalice: hi\n\n"
+        )
+        await adapter._handle_message(_post(
+            msg="@hermesbot summarize",
+            tmid="t1",
+            mentions=[{"_id": "bot_uid", "username": "hermesbot"}],
+        ))
+        event = adapter.handle_message.await_args[0][0]
+        assert event.text.startswith("[Thread context]")
+        assert event.text.rstrip().endswith("summarize")
+        assert event.source.thread_id == "t1"
+
+    @pytest.mark.asyncio
+    async def test_not_injected_when_session_exists(self):
+        adapter = _wired_adapter(room_type="dm")
+        adapter._has_active_session_for_thread = MagicMock(return_value=True)
+        adapter._fetch_thread_context = AsyncMock()
+        await adapter._handle_message(_post(msg="hello", tmid="t1"))
+        adapter._fetch_thread_context.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_not_fetched_outside_threads(self):
+        adapter = _wired_adapter(room_type="dm")
+        adapter._fetch_thread_context = AsyncMock()
+        await adapter._handle_message(_post(msg="hello"))
+        adapter._fetch_thread_context.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Agent tools
+# ---------------------------------------------------------------------------
+
+_tools = _rc.tools
+
+
+class TestAgentTools:
+    def test_tools_registered_into_platform_toolset(self):
+        ctx = MagicMock()
+        register(ctx)
+        names = {c[1]["name"] for c in ctx.register_tool.call_args_list}
+        assert names == {
+            "rocketchat_list_channels",
+            "rocketchat_create_channel",
+            "rocketchat_dm",
+        }
+        assert {c[1]["toolset"] for c in ctx.register_tool.call_args_list} == {
+            "rocketchat"
+        }
+        assert all(c[1]["is_async"] for c in ctx.register_tool.call_args_list)
+
+    @pytest.mark.asyncio
+    async def test_dm_without_message_returns_room_id(self, monkeypatch):
+        async def fake_api(method, path, **kw):
+            assert (method, path) == ("POST", "im.create")
+            assert kw["payload"] == {"username": "zed"}
+            return {"room": {"_id": "dm42"}}
+
+        monkeypatch.setattr(_tools, "_api", fake_api)
+        out = json.loads(await _tools.handle_dm({"username": "@zed"}))
+        assert out["room_id"] == "dm42"
+        assert out["sent"] is False
+        assert "rocketchat:dm42" in out["hint"]
+
+    @pytest.mark.asyncio
+    async def test_dm_with_message_sends(self, monkeypatch):
+        calls = []
+
+        async def fake_api(method, path, **kw):
+            calls.append((path, kw.get("payload")))
+            if path == "im.create":
+                return {"room": {"_id": "dm42"}}
+            return {"message": {"_id": "m9"}}
+
+        monkeypatch.setattr(_tools, "_api", fake_api)
+        out = json.loads(await _tools.handle_dm({"username": "zed", "message": "hi"}))
+        assert out["sent"] is True
+        assert out["message_id"] == "m9"
+        assert ("chat.postMessage", {"roomId": "dm42", "text": "hi"}) in calls
+
+    @pytest.mark.asyncio
+    async def test_dm_requires_username(self):
+        out = json.loads(await _tools.handle_dm({}))
+        assert "error" in out
+
+    @pytest.mark.asyncio
+    async def test_create_channel_private_uses_groups(self, monkeypatch):
+        seen = {}
+
+        async def fake_api(method, path, **kw):
+            seen["path"], seen["payload"] = path, kw.get("payload")
+            return {"group": {"_id": "g1", "name": "secret"}}
+
+        monkeypatch.setattr(_tools, "_api", fake_api)
+        out = json.loads(await _tools.handle_create_channel(
+            {"name": "secret", "private": True, "members": ["@a", "b"]}
+        ))
+        assert seen["path"] == "groups.create"
+        assert seen["payload"]["members"] == ["a", "b"]
+        assert out["room_id"] == "g1"
+        assert out["private"] is True
+
+    @pytest.mark.asyncio
+    async def test_create_channel_surfaces_permission_error(self, monkeypatch):
+        async def fake_api(method, path, **kw):
+            return {"_error": "unauthorized"}
+
+        monkeypatch.setattr(_tools, "_api", fake_api)
+        out = json.loads(await _tools.handle_create_channel({"name": "x"}))
+        assert "unauthorized" in out["error"]
+
+    @pytest.mark.asyncio
+    async def test_list_channels_merges_and_filters(self, monkeypatch):
+        async def fake_api(method, path, **kw):
+            if path == "channels.list":
+                return {"channels": [{"_id": "c1", "name": "general", "usersCount": 5}]}
+            return {"groups": [{"_id": "g1", "name": "dev-private", "usersCount": 2}]}
+
+        monkeypatch.setattr(_tools, "_api", fake_api)
+        out = json.loads(await _tools.handle_list_channels({"filter": "dev"}))
+        assert out["count"] == 1
+        assert out["channels"][0]["room_id"] == "g1"
+        assert out["channels"][0]["type"] == "group"
+
+    @pytest.mark.asyncio
+    async def test_list_channels_error_when_both_fail(self, monkeypatch):
+        async def fake_api(method, path, **kw):
+            return {"_error": "no permission"}
+
+        monkeypatch.setattr(_tools, "_api", fake_api)
+        out = json.loads(await _tools.handle_list_channels({}))
+        assert "error" in out

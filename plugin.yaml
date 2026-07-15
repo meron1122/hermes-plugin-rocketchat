@@ -8,6 +8,10 @@ description: >
   outbound traffic and the Realtime (DDP) WebSocket for inbound messages.
   Uses aiohttp (already a Hermes dependency) — no extra packages needed.
 author: Nous Research, cyb0rgk1tty, meron1122, HearthCore (Timo Goetzken)
+provides_tools:
+  - rocketchat_list_channels
+  - rocketchat_create_channel
+  - rocketchat_dm
 requires_env:
   - name: ROCKETCHAT_URL
     description: "Server URL (e.g. https://rc.example.com)"

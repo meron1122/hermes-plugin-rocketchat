@@ -163,6 +163,30 @@ The adapter reconnects automatically (exponential backoff 2–60s), but a too-ag
 | Cron delivery | ✅ Standalone REST-only sender |
 | Setup wizard | ✅ `hermes gateway setup` |
 | Plugin discovery | ✅ Auto-discover via `kind: platform` |
+| Thread context | ✅ First mention in a thread pulls in prior thread messages |
+| Agent tools | ✅ Channel listing/creation + DMs (see below) |
+
+---
+
+## Agent Tools
+
+The plugin registers three Rocket.Chat tools the agent can call during a conversation:
+
+| Tool | What it does | Bot permission needed |
+|------|--------------|-----------------------|
+| `rocketchat_list_channels` | List channels/private groups with `room_id`, topic, member count | `view-c-room` for public channels; private groups only where the bot is a member |
+| `rocketchat_create_channel` | Create a public channel or private group and invite members | `create-c` / `create-p` |
+| `rocketchat_dm` | Open a DM room with any user by username, optionally send a message immediately | — |
+
+Combined with the built-in `cronjob` tool this enables natural flows like:
+
+> *"hey, remind @zed about the deploy tomorrow at 9 — in a DM"*
+
+The agent opens @zed's DM room via `rocketchat_dm` (which returns the `room_id`) and schedules a cron job with `deliver="rocketchat:<room_id>"`, so the reminder lands in the DM even if the gateway restarted in between.
+
+### Thread context
+
+When the bot is mentioned in a thread it hasn't participated in yet, it fetches the earlier thread messages (thread parent + replies via `chat.getThreadMessages`) and injects them as context — so "@bot, summarize this thread" just works. Injection happens only on the bot's first turn in the thread; after that the session history carries the conversation. Messages from users not on `ROCKETCHAT_ALLOWED_USERS` are tagged `[unverified]` and framed as background information, not instructions.
 
 ---
 

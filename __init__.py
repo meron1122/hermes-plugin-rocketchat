@@ -40,12 +40,26 @@ from .helpers import (
     validate_config,
 )
 from .setup_wizard import interactive_setup
+from .tools import TOOLS
 
 __all__ = ["register", "RocketchatAdapter"]
 
 
 def register(ctx):
     """Plugin entry point: called by the Hermes plugin system."""
+    # Agent tools — land in the auto-generated ``hermes-rocketchat``
+    # toolset because their toolset name matches the platform name.
+    for tool_name, schema, handler, emoji in TOOLS:
+        ctx.register_tool(
+            name=tool_name,
+            toolset="rocketchat",
+            schema=schema,
+            handler=handler,
+            check_fn=check_requirements,
+            is_async=True,
+            emoji=emoji,
+        )
+
     ctx.register_platform(
         name="rocketchat",
         label="Rocket.Chat",
