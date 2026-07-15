@@ -39,6 +39,10 @@ optional_env:
     description: "Room ID for cron / notification delivery"
     prompt: "Home channel room ID (or empty)"
     password: false
+  - name: ROCKETCHAT_SUPPRESS_HOME_CHANNEL_NOTICE
+    description: "Suppress the one-time missing home-channel notice (default: false)"
+    prompt: "Suppress missing home-channel notice? (true/false)"
+    password: false
   - name: ROCKETCHAT_REQUIRE_MENTION
     description: "Require @mention in channels (default: true)"
     prompt: "Require @mention in channels?"

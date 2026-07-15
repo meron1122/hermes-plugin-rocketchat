@@ -72,9 +72,13 @@ systemctl restart hermes-gateway
 | `ROCKETCHAT_ALLOWED_USERS` | — | `""` | Erlaubte User-IDs (komma-getrennt) |
 | `ROCKETCHAT_ALLOW_ALL_USERS` | — | `false` | Alle User erlauben (dev only) |
 | `ROCKETCHAT_HOME_CHANNEL` | — | — | Room-ID für Cron-Benachrichtigungen |
+| `ROCKETCHAT_SUPPRESS_HOME_CHANNEL_NOTICE` | — | `false` | Einmaligen `/sethome`-Hinweis unterdrücken, wenn kein Home-Channel konfiguriert ist |
 | `ROCKETCHAT_REQUIRE_MENTION` | — | `true` | @mention-Pflicht in Channels |
 | `ROCKETCHAT_FREE_RESPONSE_CHANNELS` | — | — | Rooms ohne @mention-Pflicht |
 | `ROCKETCHAT_REPLY_MODE` | — | `off` | `thread` für Replies in Channels/Gruppen; Bot-Antworten in DMs bleiben flach |
+
+`ROCKETCHAT_SUPPRESS_HOME_CHANNEL_NOTICE=true` blendet nur den Hinweis aus. Es
+konfiguriert kein Zustellziel und ändert das Cron-Routing nicht.
 
 ---
 

@@ -160,6 +160,14 @@ class TestEnvEnablement:
         assert seed["reply_mode"] == "thread"
         assert seed["home_channel"]["chat_id"] == "room42"
 
+    def test_seeds_home_notice_suppression(self, monkeypatch):
+        monkeypatch.setenv("ROCKETCHAT_URL", "https://rc.example.com")
+        monkeypatch.setenv("ROCKETCHAT_TOKEN", "my-pat")
+        monkeypatch.setenv("ROCKETCHAT_USER_ID", "uid123")
+        monkeypatch.setenv("ROCKETCHAT_SUPPRESS_HOME_CHANNEL_NOTICE", "true")
+        seed = _env_enablement()
+        assert seed["suppress_home_channel_notice"] == "true"
+
 
 # ---------------------------------------------------------------------------
 # Plugin registration
@@ -518,6 +526,74 @@ class TestSend:
         result = await adapter.send("room1", "")
         assert result.success is True
         adapter._api_post.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_suppresses_exact_home_channel_notice_when_enabled(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv(
+            "ROCKETCHAT_SUPPRESS_HOME_CHANNEL_NOTICE", "true"
+        )
+        adapter = self._adapter()
+        adapter._api_post = AsyncMock()
+        notice = (
+            "📬 No home channel is set for Rocketchat. "
+            "A home channel is where Hermes delivers cron job results "
+            "and cross-platform messages.\n\n"
+            "Type /sethome to make this chat your home channel, "
+            "or ignore to skip."
+        )
+
+        result = await adapter.send("room1", notice)
+
+        assert result.success is True
+        adapter._api_post.assert_not_awaited()
+        adapter._sync_title_to_rc_topic.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_sends_home_channel_notice_by_default(self):
+        adapter = self._adapter()
+        adapter._api_post = AsyncMock(
+            return_value={"success": True, "message": {"_id": "new_msg"}}
+        )
+        notice = (
+            "📬 No home channel is set for Rocketchat. "
+            "A home channel is where Hermes delivers cron job results "
+            "and cross-platform messages.\n\n"
+            "Type /sethome to make this chat your home channel, "
+            "or ignore to skip."
+        )
+
+        result = await adapter.send("room1", notice)
+
+        assert result.success is True
+        adapter._api_post.assert_awaited_once()
+        adapter._sync_title_to_rc_topic.assert_awaited_once_with("room1")
+
+    @pytest.mark.asyncio
+    async def test_does_not_suppress_similar_home_channel_text(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv(
+            "ROCKETCHAT_SUPPRESS_HOME_CHANNEL_NOTICE", "true"
+        )
+        adapter = self._adapter()
+        adapter._api_post = AsyncMock(
+            return_value={"success": True, "message": {"_id": "new_msg"}}
+        )
+        similar_notice = (
+            "📬 No home channel is set for Rocketchat. "
+            "A home channel is where Hermes delivers cron job results "
+            "and cross-platform messages.\n\n"
+            "Type /sethome to make this chat your home channel, "
+            "or ignore to skip. Extra context."
+        )
+
+        result = await adapter.send("room1", similar_notice)
+
+        assert result.success is True
+        adapter._api_post.assert_awaited_once()
+        adapter._sync_title_to_rc_topic.assert_awaited_once_with("room1")
 
     @pytest.mark.asyncio
     async def test_failed_post_reported(self):

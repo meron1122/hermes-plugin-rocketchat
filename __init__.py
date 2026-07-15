@@ -24,6 +24,7 @@ Environment variables:
     ROCKETCHAT_ALLOWED_USERS    Comma-separated user IDs
     ROCKETCHAT_ALLOW_ALL_USERS  Allow all users (dev only)
     ROCKETCHAT_HOME_CHANNEL     Room ID for cron/notification delivery
+    ROCKETCHAT_SUPPRESS_HOME_CHANNEL_NOTICE  Hide missing-home-channel notice
     ROCKETCHAT_REQUIRE_MENTION  Require @mention in channels (default: true)
     ROCKETCHAT_FREE_RESPONSE_CHANNELS  Rooms exempt from mention requirement
     ROCKETCHAT_REPLY_MODE       Channel/group replies: 'thread' or 'off' (default: off)

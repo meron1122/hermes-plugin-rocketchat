@@ -24,6 +24,14 @@ from .media import MediaMixin
 
 logger = logging.getLogger(__name__)
 
+_HERMES_HOME_CHANNEL_NOTICE = (
+    "📬 No home channel is set for Rocketchat. "
+    "A home channel is where Hermes delivers cron job results "
+    "and cross-platform messages.\n\n"
+    "Type /sethome to make this chat your home channel, "
+    "or ignore to skip."
+)
+
 
 class RocketchatAdapter(
     InboundMixin, MediaMixin, DdpTransportMixin, BasePlatformAdapter
@@ -72,6 +80,16 @@ class RocketchatAdapter(
             extra.get("reply_mode", "")
             or os.getenv("ROCKETCHAT_REPLY_MODE", "off")
         ).lower()
+
+        suppress_home_notice = (
+            extra.get("suppress_home_channel_notice")
+            if "suppress_home_channel_notice" in extra
+            else os.getenv("ROCKETCHAT_SUPPRESS_HOME_CHANNEL_NOTICE", "false")
+        )
+        self._suppress_home_channel_notice = (
+            str(suppress_home_notice).strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
 
         # Dedup cache.
         self._dedup = MessageDeduplicator()
@@ -242,6 +260,14 @@ class RocketchatAdapter(
     ) -> SendResult:
         """Send a message (or multiple chunks) to a room."""
         if not content:
+            return SendResult(success=True)
+        if (
+            self._suppress_home_channel_notice
+            and content == _HERMES_HOME_CHANNEL_NOTICE
+        ):
+            logger.debug(
+                "Rocket.Chat: suppressed Hermes home-channel onboarding notice"
+            )
             return SendResult(success=True)
 
         formatted = self.format_message(content)

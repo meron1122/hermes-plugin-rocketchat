@@ -92,6 +92,12 @@ def _env_enablement() -> dict | None:
     if reply_mode:
         seed["reply_mode"] = reply_mode
 
+    suppress_home_notice = os.getenv(
+        "ROCKETCHAT_SUPPRESS_HOME_CHANNEL_NOTICE", ""
+    ).strip()
+    if suppress_home_notice:
+        seed["suppress_home_channel_notice"] = suppress_home_notice
+
     home = os.getenv("ROCKETCHAT_HOME_CHANNEL", "").strip()
     if home:
         seed["home_channel"] = {

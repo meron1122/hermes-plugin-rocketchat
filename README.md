@@ -137,9 +137,13 @@ The adapter reconnects automatically (exponential backoff 2–60s), but a too-ag
 | `ROCKETCHAT_ALLOWED_USERS` | — | `""` | Comma-separated list of allowed user IDs |
 | `ROCKETCHAT_ALLOW_ALL_USERS` | — | `false` | Allow all users (dev only) |
 | `ROCKETCHAT_HOME_CHANNEL` | — | — | Room ID for cron / notification delivery |
+| `ROCKETCHAT_SUPPRESS_HOME_CHANNEL_NOTICE` | — | `false` | Suppress the one-time `/sethome` notice when no home channel is configured |
 | `ROCKETCHAT_REQUIRE_MENTION` | — | `true` | Require @mention to trigger in channels |
 | `ROCKETCHAT_FREE_RESPONSE_CHANNELS` | — | — | Room IDs where @mention is not required |
 | `ROCKETCHAT_REPLY_MODE` | — | `off` | `thread` for threaded channel/group replies, `off` for flat; bot replies in DMs stay flat |
+
+Setting `ROCKETCHAT_SUPPRESS_HOME_CHANNEL_NOTICE=true` only hides the onboarding
+notice. It does not configure a delivery target or change cron routing.
 
 ---
 
