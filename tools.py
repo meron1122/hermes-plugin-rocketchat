@@ -108,6 +108,38 @@ async def handle_create_channel(args: dict, **kw) -> str:
     )
 
 
+async def handle_post(args: dict, **kw) -> str:
+    """Post a message to a channel/group by name or room id."""
+    message = str(args.get("message") or "").strip()
+    if not message:
+        return tool_error("message is required")
+    room_id = str(args.get("room_id") or "").strip()
+    channel = str(args.get("channel") or "").strip().lstrip("#")
+    if not room_id and not channel:
+        return tool_error("channel (name) or room_id is required")
+
+    payload: Dict[str, Any] = {"text": message}
+    if room_id:
+        payload["roomId"] = room_id
+        target = room_id
+    else:
+        payload["channel"] = f"#{channel}"
+        target = f"#{channel}"
+    data = await _api("POST", "chat.postMessage", payload=payload)
+    if "_error" in data:
+        return tool_error(
+            f"Failed to post to {target}: {data['_error']} "
+            "(is the bot a member of the room?)"
+        )
+    msg = data.get("message") or {}
+    return tool_result(
+        sent=True,
+        target=target,
+        room_id=msg.get("rid") or room_id,
+        message_id=msg.get("_id"),
+    )
+
+
 async def handle_dm(args: dict, **kw) -> str:
     """Open (or reuse) a DM room with a user; optionally send a message."""
     username = str(args.get("username") or "").strip().lstrip("@")
@@ -193,6 +225,36 @@ CREATE_CHANNEL_SCHEMA = {
     },
 }
 
+POST_SCHEMA = {
+    "name": "rocketchat_post",
+    "description": (
+        "Post a message to a Rocket.Chat channel or private group — use this "
+        "to deliver results to a different room than the current conversation "
+        "(e.g. 'research this thread and post the summary to #reports'). "
+        "Target by channel name (leading # optional) or by room_id (from "
+        "rocketchat_list_channels). The bot must be a member of the room. "
+        "For scheduled posts use cronjob deliver='rocketchat:<room_id>' instead."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "channel": {
+                "type": "string",
+                "description": "Channel/group name, e.g. '#reports' or 'reports'",
+            },
+            "room_id": {
+                "type": "string",
+                "description": "Exact room id (takes precedence over channel)",
+            },
+            "message": {
+                "type": "string",
+                "description": "Message text to post (Rocket.Chat renders Markdown)",
+            },
+        },
+        "required": ["message"],
+    },
+}
+
 DM_SCHEMA = {
     "name": "rocketchat_dm",
     "description": (
@@ -221,5 +283,6 @@ DM_SCHEMA = {
 TOOLS = (
     ("rocketchat_list_channels", LIST_CHANNELS_SCHEMA, handle_list_channels, "📋"),
     ("rocketchat_create_channel", CREATE_CHANNEL_SCHEMA, handle_create_channel, "➕"),
+    ("rocketchat_post", POST_SCHEMA, handle_post, "📣"),
     ("rocketchat_dm", DM_SCHEMA, handle_dm, "✉️"),
 )

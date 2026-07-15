@@ -11,6 +11,7 @@ author: Nous Research, cyb0rgk1tty, meron1122, HearthCore (Timo Goetzken)
 provides_tools:
   - rocketchat_list_channels
   - rocketchat_create_channel
+  - rocketchat_post
   - rocketchat_dm
 requires_env:
   - name: ROCKETCHAT_URL

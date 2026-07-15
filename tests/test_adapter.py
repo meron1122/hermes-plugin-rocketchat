@@ -653,6 +653,7 @@ class TestAgentTools:
         assert names == {
             "rocketchat_list_channels",
             "rocketchat_create_channel",
+            "rocketchat_post",
             "rocketchat_dm",
         }
         assert {c[1]["toolset"] for c in ctx.register_tool.call_args_list} == {
@@ -693,6 +694,54 @@ class TestAgentTools:
     async def test_dm_requires_username(self):
         out = json.loads(await _tools.handle_dm({}))
         assert "error" in out
+
+    @pytest.mark.asyncio
+    async def test_post_by_channel_name_adds_hash(self, monkeypatch):
+        seen = {}
+
+        async def fake_api(method, path, **kw):
+            seen["path"], seen["payload"] = path, kw.get("payload")
+            return {"message": {"_id": "m1", "rid": "c9"}}
+
+        monkeypatch.setattr(_tools, "_api", fake_api)
+        out = json.loads(await _tools.handle_post(
+            {"channel": "reports", "message": "summary"}
+        ))
+        assert seen["path"] == "chat.postMessage"
+        assert seen["payload"] == {"text": "summary", "channel": "#reports"}
+        assert out["sent"] is True
+        assert out["room_id"] == "c9"
+
+    @pytest.mark.asyncio
+    async def test_post_by_room_id(self, monkeypatch):
+        seen = {}
+
+        async def fake_api(method, path, **kw):
+            seen["payload"] = kw.get("payload")
+            return {"message": {"_id": "m1", "rid": "r7"}}
+
+        monkeypatch.setattr(_tools, "_api", fake_api)
+        out = json.loads(await _tools.handle_post(
+            {"room_id": "r7", "message": "hi"}
+        ))
+        assert seen["payload"] == {"text": "hi", "roomId": "r7"}
+        assert out["message_id"] == "m1"
+
+    @pytest.mark.asyncio
+    async def test_post_requires_message_and_target(self):
+        assert "error" in json.loads(await _tools.handle_post({"channel": "x"}))
+        assert "error" in json.loads(await _tools.handle_post({"message": "x"}))
+
+    @pytest.mark.asyncio
+    async def test_post_surfaces_api_error(self, monkeypatch):
+        async def fake_api(method, path, **kw):
+            return {"_error": "not-allowed"}
+
+        monkeypatch.setattr(_tools, "_api", fake_api)
+        out = json.loads(await _tools.handle_post(
+            {"channel": "reports", "message": "x"}
+        ))
+        assert "not-allowed" in out["error"]
 
     @pytest.mark.asyncio
     async def test_create_channel_private_uses_groups(self, monkeypatch):

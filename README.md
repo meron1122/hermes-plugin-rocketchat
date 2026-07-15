@@ -176,6 +176,7 @@ The plugin registers three Rocket.Chat tools the agent can call during a convers
 |------|--------------|-----------------------|
 | `rocketchat_list_channels` | List channels/private groups with `room_id`, topic, member count | `view-c-room` for public channels; private groups only where the bot is a member |
 | `rocketchat_create_channel` | Create a public channel or private group and invite members | `create-c` / `create-p` |
+| `rocketchat_post` | Post a message to any channel/group by name (`#reports`) or `room_id` | bot must be a room member |
 | `rocketchat_dm` | Open a DM room with any user by username, optionally send a message immediately | — |
 
 Combined with the built-in `cronjob` tool this enables natural flows like:
@@ -183,6 +184,10 @@ Combined with the built-in `cronjob` tool this enables natural flows like:
 > *"hey, remind @zed about the deploy tomorrow at 9 — in a DM"*
 
 The agent opens @zed's DM room via `rocketchat_dm` (which returns the `room_id`) and schedules a cron job with `deliver="rocketchat:<room_id>"`, so the reminder lands in the DM even if the gateway restarted in between.
+
+> *"research this thread and post the summary to #reports"*
+
+Thread context gives the agent the discussion, and `rocketchat_post` delivers the result to a different room than the one the conversation is happening in (Hermes deliberately ships no generic agent-callable `send_message` — cross-room posting on Rocket.Chat goes through this tool).
 
 ### Thread context
 
