@@ -86,6 +86,12 @@ class InboundMixin:
             return  # All other system messages: skip
 
         message_text = post.get("msg", "") or ""
+        physical_thread_id = post.get("tmid") or None
+        has_active_thread_session = bool(physical_thread_id) and (
+            self._has_active_session_for_thread(
+                room_id, chat_type, physical_thread_id, sender_id
+            )
+        )
 
         # Mention gating for non-DM rooms.
         if chat_type != "dm":
@@ -112,7 +118,14 @@ class InboundMixin:
                 )
                 has_mention = bool(pattern.search(message_text))
 
-            if require_mention and not is_free_channel and not has_mention:
+            # A reply in an existing Hermes thread is already addressed to
+            # the bot. Unknown threads still require an explicit mention.
+            if (
+                require_mention
+                and not is_free_channel
+                and not has_mention
+                and not has_active_thread_session
+            ):
                 return
 
             if has_mention and self._bot_username:
@@ -123,9 +136,20 @@ class InboundMixin:
                     flags=re.IGNORECASE,
                 ).strip()
 
-        
-
-        thread_id = post.get("tmid") or None
+        # In thread reply mode, treat an addressed top-level channel/group
+        # message as the root of the conversation from the first turn. Hermes
+        # then carries this ID in metadata for every outbound path, including
+        # clarify prompts and status messages that do not receive ``reply_to``.
+        # Keep the physical Rocket.Chat ``tmid`` separate: only genuine thread
+        # replies should trigger thread-history fetching below.
+        thread_id = physical_thread_id
+        if (
+            not thread_id
+            and self._reply_mode == "thread"
+            and chat_type in {"channel", "group"}
+            and post_id
+        ):
+            thread_id = post_id
 
         # Route RC-native slash commands back to Rocket.Chat.
         # Check both the raw post text AND the stripped message_text.
@@ -173,8 +197,8 @@ class InboundMixin:
                         "roomId": room_id,
                         "params": cmd_params,
                     }
-                    if thread_id:
-                        rc_payload["tmid"] = thread_id
+                    if physical_thread_id:
+                        rc_payload["tmid"] = physical_thread_id
                     data = await self._api_post("commands.run", rc_payload)
                     if data and data.get("success"):
                         logger.info(
@@ -230,13 +254,13 @@ class InboundMixin:
         # session guard ensures this happens only once — afterwards the
         # session history already holds the thread.
         if (
-            thread_id
+            physical_thread_id
             and not _found_slash_cmd
-            and not self._has_active_session_for_thread(
-                room_id, chat_type, thread_id, sender_id
-            )
+            and not has_active_thread_session
         ):
-            thread_context = await self._fetch_thread_context(thread_id, post_id)
+            thread_context = await self._fetch_thread_context(
+                physical_thread_id, post_id
+            )
             if thread_context:
                 message_text = thread_context + message_text
 

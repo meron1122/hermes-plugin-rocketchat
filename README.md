@@ -95,7 +95,7 @@ The bot only receives messages from rooms it is a **member** of (the DDP `__my_m
 /invite @hermes-bot
 ```
 
-In channels the bot answers only when @mentioned (unless the room ID is in `ROCKETCHAT_FREE_RESPONSE_CHANNELS` or you set `ROCKETCHAT_REQUIRE_MENTION=false`).
+In channels the bot answers only when @mentioned (unless the room ID is in `ROCKETCHAT_FREE_RESPONSE_CHANNELS` or you set `ROCKETCHAT_REQUIRE_MENTION=false`). With `ROCKETCHAT_REPLY_MODE=thread`, only the first message needs the mention: replies inside that active Hermes thread are picked up automatically, while unrelated threads remain ignored.
 
 ### Admin settings worth checking
 
@@ -140,7 +140,7 @@ The adapter reconnects automatically (exponential backoff 2–60s), but a too-ag
 | `ROCKETCHAT_SUPPRESS_HOME_CHANNEL_NOTICE` | — | `false` | Suppress the one-time `/sethome` notice when no home channel is configured |
 | `ROCKETCHAT_REQUIRE_MENTION` | — | `true` | Require @mention to trigger in channels |
 | `ROCKETCHAT_FREE_RESPONSE_CHANNELS` | — | — | Room IDs where @mention is not required |
-| `ROCKETCHAT_REPLY_MODE` | — | `off` | `thread` for threaded channel/group replies, `off` for flat; bot replies in DMs stay flat |
+| `ROCKETCHAT_REPLY_MODE` | — | `off` | `thread` keeps channel/group conversations, including clarification prompts, in one thread; `off` sends flat replies; DMs stay flat |
 
 Setting `ROCKETCHAT_SUPPRESS_HOME_CHANNEL_NOTICE=true` only hides the onboarding
 notice. It does not configure a delivery target or change cron routing.
@@ -156,7 +156,7 @@ notice. It does not configure a delivery target or change cron routing.
 | DM sender identity | ✅ Rocket.Chat display name with username/ID fallbacks |
 | File upload | ✅ Two-step `rooms.media` + `rooms.mediaConfirm` |
 | Attachment download | ✅ With image/audio/document cache |
-| Thread support | ✅ Via `tmid` in channels/groups; bot replies in DMs stay flat |
+| Thread support | ✅ Clarifications and follow-ups stay under the channel/group root via `tmid`; DMs stay flat |
 | Mention gating | ✅ Configurable per room |
 | Typing indicator | ✅ Rocket.Chat 8.x compatible |
 | Reconnect | ✅ Exponential backoff (2s–60s) |
@@ -197,6 +197,8 @@ Thread context gives the agent the discussion, and `rocketchat_post` delivers th
 ### Thread context
 
 When the bot is mentioned in a thread it hasn't participated in yet, it fetches the earlier thread messages (thread parent + replies via `chat.getThreadMessages`) and injects them as context — so "@bot, summarize this thread" just works. Injection happens only on the bot's first turn in the thread; after that the session history carries the conversation. Messages from users not on `ROCKETCHAT_ALLOWED_USERS` are tagged `[unverified]` and framed as background information, not instructions.
+
+In `ROCKETCHAT_REPLY_MODE=thread`, a top-level message that addresses the bot becomes the conversation's thread root immediately. Clarification questions are posted under that root, and follow-up replies in the active Hermes thread do not need another @mention. A message in a different or unknown thread still requires an explicit mention.
 
 ---
 

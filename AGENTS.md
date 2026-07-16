@@ -111,6 +111,19 @@ Use `_thread_target_for_reply()` for every interactive outbound path. It also
 prefers `metadata["thread_id"]` over `reply_to`, because Hermes carries an
 existing thread's root in metadata while `reply_to` may be a child message ID.
 
+### 11. Thread Mode Uses the Root as the Session ID
+
+For a top-level channel/group message in `ROCKETCHAT_REPLY_MODE=thread`, expose
+the message's own `_id` as `SessionSource.thread_id`. This keeps the initial
+turn, final reply, clarification prompts, and subsequent replies on one Hermes
+session key and one Rocket.Chat `tmid` root.
+
+Keep the physical inbound `post.tmid` separate from this logical conversation
+thread ID. Only a physical thread reply should trigger history fetching or be
+passed to `commands.run`. A channel message without an @mention may bypass the
+mention gate only when its physical `tmid` maps to an existing Hermes session;
+never exempt every thread globally.
+
 ## Known Pitfalls
 
 | Pitfall | Detail | Mitigation |

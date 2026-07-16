@@ -441,6 +441,29 @@ class TestSend:
         assert posted["tmid"] == "root_msg"
 
     @pytest.mark.asyncio
+    async def test_clarify_prompt_uses_metadata_thread_root(self):
+        adapter = self._adapter("thread")
+        adapter._room_type_cache["room1"] = "channel"
+        posted = {}
+
+        async def fake_post(path, payload):
+            posted.update(payload)
+            return {"success": True, "message": {"_id": "clarify_msg"}}
+
+        adapter._api_post = fake_post
+        result = await adapter.send_clarify(
+            chat_id="room1",
+            question="When should I check?",
+            choices=None,
+            clarify_id="clarify-1",
+            session_key="session-1",
+            metadata={"thread_id": "root_msg"},
+        )
+
+        assert result.success is True
+        assert posted["tmid"] == "root_msg"
+
+    @pytest.mark.asyncio
     async def test_unknown_room_type_stays_flat(self):
         adapter = self._adapter("thread")
         adapter._api_get = AsyncMock(return_value={})
@@ -837,6 +860,111 @@ class TestHandleMessage:
         event = adapter.handle_message.await_args[0][0]
         assert "@hermesbot" not in event.text
         assert "hello" in event.text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("room_type", ["channel", "group"])
+    async def test_top_level_mention_becomes_thread_session_root(
+        self, room_type
+    ):
+        adapter = _wired_adapter(room_type=room_type)
+        adapter._reply_mode = "thread"
+
+        await adapter._handle_message(_post(
+            post_id="root-message",
+            msg="@hermesbot hello",
+            mentions=[{"_id": "bot_uid", "username": "hermesbot"}],
+        ))
+
+        event = adapter.handle_message.await_args[0][0]
+        assert event.source.thread_id == "root-message"
+
+    @pytest.mark.asyncio
+    async def test_top_level_channel_message_stays_flat_in_off_mode(self):
+        adapter = _wired_adapter(room_type="channel")
+
+        await adapter._handle_message(_post(
+            post_id="root-message",
+            msg="@hermesbot hello",
+            mentions=[{"_id": "bot_uid", "username": "hermesbot"}],
+        ))
+
+        event = adapter.handle_message.await_args[0][0]
+        assert event.source.thread_id is None
+
+    @pytest.mark.asyncio
+    async def test_top_level_dm_stays_flat_in_thread_mode(self):
+        adapter = _wired_adapter(room_type="dm")
+        adapter._reply_mode = "thread"
+
+        await adapter._handle_message(_post(post_id="dm-message"))
+
+        event = adapter.handle_message.await_args[0][0]
+        assert event.source.thread_id is None
+
+    @pytest.mark.asyncio
+    async def test_unmentioned_reply_in_active_thread_is_dispatched(self):
+        adapter = _wired_adapter(room_type="channel")
+        adapter._has_active_session_for_thread = MagicMock(return_value=True)
+        adapter._fetch_thread_context = AsyncMock()
+
+        await adapter._handle_message(_post(msg="2", tmid="root-message"))
+
+        adapter.handle_message.assert_awaited_once()
+        event = adapter.handle_message.await_args[0][0]
+        assert event.text == "2"
+        assert event.source.thread_id == "root-message"
+        adapter._fetch_thread_context.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_root_and_unmentioned_reply_share_session_key(self):
+        adapter = _wired_adapter(room_type="channel")
+        adapter._reply_mode = "thread"
+
+        await adapter._handle_message(_post(
+            post_id="root-message",
+            msg="@hermesbot choose a time",
+            mentions=[{"_id": "bot_uid", "username": "hermesbot"}],
+        ))
+        root_event = adapter.handle_message.await_args[0][0]
+        root_session_key = build_session_key(
+            root_event.source,
+            group_sessions_per_user=True,
+            thread_sessions_per_user=False,
+        )
+
+        adapter._session_store = MagicMock()
+        adapter._session_store.config.group_sessions_per_user = True
+        adapter._session_store.config.thread_sessions_per_user = False
+        adapter._session_store._entries = {root_session_key: object()}
+        adapter._fetch_thread_context = AsyncMock()
+        adapter.handle_message.reset_mock()
+
+        await adapter._handle_message(_post(
+            post_id="thread-reply",
+            msg="2",
+            tmid="root-message",
+        ))
+
+        reply_event = adapter.handle_message.await_args[0][0]
+        reply_session_key = build_session_key(
+            reply_event.source,
+            group_sessions_per_user=True,
+            thread_sessions_per_user=False,
+        )
+        assert reply_session_key == root_session_key
+        adapter._fetch_thread_context.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unmentioned_reply_in_unknown_thread_is_gated(self):
+        adapter = _wired_adapter(room_type="channel")
+        adapter._has_active_session_for_thread = MagicMock(return_value=False)
+
+        await adapter._handle_message(_post(
+            msg="unrelated reply",
+            tmid="someone-elses-thread",
+        ))
+
+        adapter.handle_message.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_rc_native_slash_command_routed_to_rc(self):
