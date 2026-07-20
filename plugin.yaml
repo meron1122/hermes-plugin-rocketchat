@@ -1,7 +1,7 @@
 name: rocketchat-platform
 label: Rocket.Chat
 kind: platform
-version: 1.1.1
+version: 1.2.0
 description: >
   Rocket.Chat gateway adapter for Hermes Agent.
   Connects to a self-hosted Rocket.Chat instance via the REST API v1 for
@@ -12,6 +12,7 @@ provides_tools:
   - rocketchat_list_channels
   - rocketchat_create_channel
   - rocketchat_post
+  - rocketchat_send_file
   - rocketchat_dm
 requires_env:
   - name: ROCKETCHAT_URL
@@ -54,4 +55,8 @@ optional_env:
   - name: ROCKETCHAT_REPLY_MODE
     description: "Reply mode: 'thread' in channels/groups, 'off' for flat; DM bot replies stay flat"
     prompt: "Reply mode (thread / off)"
+    password: false
+  - name: ROCKETCHAT_AGENT_FILE_MAX_BYTES
+    description: "Maximum local file size for agent-triggered uploads in bytes; 0 disables the guard (default: 104857600)"
+    prompt: "Agent file upload limit in bytes (0 for unlimited)"
     password: false

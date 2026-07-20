@@ -17,6 +17,13 @@ hermes plugins enable rocketchat-platform
 hermes gateway restart
 ```
 
+To update an existing installation:
+
+```bash
+hermes plugins update rocketchat-platform
+hermes gateway restart
+```
+
 ---
 
 ## Quick Start
@@ -104,6 +111,7 @@ In channels the bot answers only when @mentioned (unless the room ID is in `ROCK
 | `Message_AllowUnrecognizedSlashCommand` → **on** | Admin → Settings → Message | RC Desktop/Browser clients swallow unknown `/` commands client-side, so Hermes commands like `/new` or `/status` never reach the server. Mobile clients are unaffected. Alternatively set the env var `OVERWRITE_SETTING_Message_AllowUnrecognizedSlashCommand=true` on the RC server. |
 | Rate Limiter | Admin → Settings → Rate Limiter | A busy bot can hit `429 Too Many Requests` on the REST API. Raise the API rate limits or exempt the bot's IP. |
 | `Message_MaxAllowedSize` | Admin → Settings → Message | The adapter chunks long replies at 5000 characters (RC's default). If you lowered this setting below 5000, long messages will be rejected. |
+| File Upload settings | Admin → Settings → File Upload | Agent file uploads follow the workspace's enabled/disabled state, MIME restrictions, maximum size, and the separate DM upload setting. Match the proxy body-size limit as well. |
 
 ### Permissions for topic sync (optional)
 
@@ -141,6 +149,7 @@ The adapter reconnects automatically (exponential backoff 2–60s), but a too-ag
 | `ROCKETCHAT_REQUIRE_MENTION` | — | `true` | Require @mention to trigger in channels |
 | `ROCKETCHAT_FREE_RESPONSE_CHANNELS` | — | — | Room IDs where @mention is not required |
 | `ROCKETCHAT_REPLY_MODE` | — | `off` | `thread` keeps channel/group conversations, including clarification prompts, in one thread; `off` sends flat replies; DMs stay flat |
+| `ROCKETCHAT_AGENT_FILE_MAX_BYTES` | — | `104857600` | Local safety limit for agent-triggered file uploads (100 MiB); set `0` to rely only on Rocket.Chat/proxy limits |
 
 Setting `ROCKETCHAT_SUPPRESS_HOME_CHANNEL_NOTICE=true` only hides the onboarding
 notice. It does not configure a delivery target or change cron routing.
@@ -154,7 +163,7 @@ notice. It does not configure a delivery target or change cron routing.
 | DDP WebSocket (inbound) | ✅ `__my_messages__` subscription |
 | REST API (outbound) | ✅ `chat.postMessage` |
 | DM sender identity | ✅ Rocket.Chat display name with username/ID fallbacks |
-| File upload | ✅ Two-step `rooms.media` + `rooms.mediaConfirm` |
+| File upload | ✅ Gateway media sends and agent-triggered uploads via `rooms.media` + `rooms.mediaConfirm` |
 | Attachment download | ✅ With image/audio/document cache |
 | Thread support | ✅ Clarifications and follow-ups stay under the channel/group root via `tmid`; DMs stay flat |
 | Mention gating | ✅ Configurable per room |
@@ -169,19 +178,20 @@ notice. It does not configure a delivery target or change cron routing.
 | Setup wizard | ✅ `hermes gateway setup` |
 | Plugin discovery | ✅ Auto-discover via `kind: platform` |
 | Thread context | ✅ First mention in a thread pulls in prior thread messages |
-| Agent tools | ✅ Channel listing/creation + DMs (see below) |
+| Agent tools | ✅ Channel listing/creation, cross-room posts, DMs, and local file uploads (see below) |
 
 ---
 
 ## Agent Tools
 
-The plugin registers three Rocket.Chat tools the agent can call during a conversation:
+The plugin registers five Rocket.Chat tools the agent can call during a conversation:
 
 | Tool | What it does | Bot permission needed |
 |------|--------------|-----------------------|
 | `rocketchat_list_channels` | List channels/private groups with `room_id`, topic, member count | `view-c-room` for public channels; private groups only where the bot is a member |
 | `rocketchat_create_channel` | Create a public channel or private group and invite members | `create-c` / `create-p` |
 | `rocketchat_post` | Post a message to any channel/group by name (`#reports`) or `room_id` | bot must be a room member |
+| `rocketchat_send_file` | Upload a local file to a channel/group, DM, or thread | bot must be able to post and upload files in the target room |
 | `rocketchat_dm` | Open a DM room with any user by username, optionally send a message immediately | — |
 
 Combined with the built-in `cronjob` tool this enables natural flows like:
@@ -193,6 +203,12 @@ The agent opens @zed's DM room via `rocketchat_dm` (which returns the `room_id`)
 > *"research this thread and post the summary to #reports"*
 
 Thread context gives the agent the discussion, and `rocketchat_post` delivers the result to a different room than the one the conversation is happening in (Hermes deliberately ships no generic agent-callable `send_message` — cross-room posting on Rocket.Chat goes through this tool).
+
+> *"send `/home/hermes/reports/sprint-28.pdf` to #reports and add the caption 'Sprint 28 report'"*
+
+`rocketchat_send_file` accepts an absolute `file_path` on the machine running Hermes and exactly one target: a channel/private-group name, an exact `room_id`, or a real Rocket.Chat `username` (login, not display name). It can also set a displayed `file_name`, attach a `caption`, and post under a thread root using `tmid`. For DMs it opens or reuses the conversation and rejects an unresolved username before uploading. For scheduled or multi-step workflows, use the literal `room_id` returned by `rocketchat_dm` or `rocketchat_list_channels`; never derive one from a name.
+
+The tool reads a file that is already present on the Hermes host. Only grant Hermes access to trusted users, and keep sensitive files outside the agent's working paths. A 100 MiB local guard is enabled by default through `ROCKETCHAT_AGENT_FILE_MAX_BYTES`; Rocket.Chat and the reverse proxy can enforce lower limits.
 
 ### Thread context
 
@@ -259,6 +275,7 @@ HERMES_AGENT_PATH=./hermes-agent pytest tests/ -v
 
 - Original Rocket.Chat adapter: [hermes-agent#4637](https://github.com/NousResearch/hermes-agent/pull/4637) by [@meron1122](https://github.com/meron1122) and [hermes-agent#14869](https://github.com/NousResearch/hermes-agent/pull/14869) by @cyb0rgk1tty
 - Extended plugin version (topic sync, slash commands, voice pipeline, reconnect): [hermes-agent#30463](https://github.com/NousResearch/hermes-agent/pull/30463) by [@HearthCore](https://github.com/HearthCore)
+- Agent-callable file uploads: [hermes-plugin-rocketchat#1](https://github.com/HalfbitStudio/hermes-plugin-rocketchat/pull/1) by [@YounesAmalou](https://github.com/YounesAmalou)
 
 Published as a standalone repo per the [hermes-agent plugin policy](https://github.com/NousResearch/hermes-agent/blob/main/CONTRIBUTING.md) — third-party integrations ship as external plugins.
 

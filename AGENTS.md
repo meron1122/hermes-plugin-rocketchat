@@ -5,7 +5,8 @@ Reference for AI coding assistants working on this plugin.
 ## Overview
 
 A Hermes gateway platform adapter for self-hosted Rocket.Chat instances.
-~1,460 lines, single-file (`adapter.py`), built on `aiohttp` (zero new deps).
+The transport, inbound routing, media, helpers, and agent tools are split into
+focused modules and built on `aiohttp` (zero new dependencies).
 
 **Architecture:** REST API v1 for outbound writes, DDP WebSocket for inbound receive.
 
@@ -13,10 +14,18 @@ A Hermes gateway platform adapter for self-hosted Rocket.Chat instances.
 
 | File | Purpose |
 |------|---------|
-| `adapter.py` | Full adapter — transport, parsing, media, reactions, cron sender |
+| `adapter.py` | Adapter composition, lifecycle, outbound text, reactions, and room metadata |
+| `ddp.py` | DDP WebSocket transport and frame routing |
+| `inbound.py` | Inbound parsing, mention/thread gating, and dispatch |
+| `media.py` | Attachment download and two-step media upload pipeline |
+| `helpers.py` | Configuration, requirements, formatting, and standalone cron sender |
+| `tools.py` | Agent-callable channel, DM, posting, and file-upload tools |
+| `setup_wizard.py` | Interactive Hermes gateway setup |
 | `plugin.yaml` | Plugin manifest — env vars, discovery metadata |
 | `__init__.py` | Exports `register()` for Hermes plugin discovery |
-| `README.md` | User-facing setup guide (German) |
+| `README.md` | User-facing setup and operations guide (English) |
+| `CHANGELOG.md` | Release history and upgrade-facing behavior changes |
+| `tests/test_adapter.py` | Unit and regression test suite |
 | `AGENTS.md` | This file — AI agent development reference |
 
 ## Critical Design Decisions
@@ -80,17 +89,17 @@ Power-on self-topic: On connect, the adapter sets the room topic to
 WebSocket dependency. Instantiates its own `aiohttp.ClientSession`, sends via
 `chat.postMessage`, cleans up. No adapter lifecycle needed.
 
-### 8. RC Admin: Unerkannte Slash Commands Weiterleiten
+### 8. RC Admin: Forward Unrecognized Slash Commands
 
-Rocket.Chat Desktop-Client (Browser) fängt unbekannte `/`-Befehle client-seitig ab —
-die Nachricht erreicht Hermes gar nicht. Mobile Clients sind nicht betroffen.
+Rocket.Chat Desktop/Browser intercepts unknown `/` commands client-side, so the
+message never reaches Hermes. Mobile clients are unaffected.
 
 **Fix:** `Message_AllowUnrecognizedSlashCommand = true` in RC Admin
 (Administration → Workspace → Settings → Message)
 
-**Env-Var-Alternative:** `OVERWRITE_SETTING_Message_AllowUnrecognizedSlashCommand=true`
+**Environment alternative:** `OVERWRITE_SETTING_Message_AllowUnrecognizedSlashCommand=true`
 
-Nur RC-Admins mit `edit-privileged-setting` Permission können das setzen.
+Only Rocket.Chat administrators with `edit-privileged-setting` can change it.
 
 ### 9. Sender Identity Uses the Display Name
 
@@ -124,6 +133,24 @@ passed to `commands.run`. A channel message without an @mention may bypass the
 mention gate only when its physical `tmid` maps to an existing Hermes session;
 never exempt every thread globally.
 
+### 12. Agent File Uploads Use Exact Targets
+
+`rocketchat_send_file` is a REST-only, agent-callable two-step upload:
+
+1. `POST rooms.media/{room_id}` uploads the bytes.
+2. `POST rooms.mediaConfirm/{room_id}/{file_id}` creates the message and carries
+   the optional caption and `tmid` thread root.
+
+Require exactly one target: a literal `room_id`, a real Rocket.Chat `username`,
+or a channel/private-group name resolved with `rooms.info`. For username targets,
+`im.create` must return a DM containing both the bot and the requested username;
+otherwise reject the send to avoid one-member ghost rooms. Compare usernames
+case-insensitively, but never infer a room ID from a display name.
+
+Only regular files are accepted. Reads run outside the event loop, and
+`ROCKETCHAT_AGENT_FILE_MAX_BYTES` provides a local guard (100 MiB by default,
+`0` to disable) before Rocket.Chat and proxy limits are applied.
+
 ## Known Pitfalls
 
 | Pitfall | Detail | Mitigation |
@@ -135,22 +162,30 @@ never exempt every thread globally.
 | ffmpeg not installed | Audio processing breaks silently | `_convert_audio_to_mp3()` returns None, logs warning |
 | Nginx close WS on 60s idle | Default proxy timeout kills long connections | Set `proxy_read_timeout 600s` |
 | `Message_AllowUnrecognizedSlashCommand` | Desktop browser shows "invalid command" error | RC admin setting required (not an adapter fix) |
+| File upload target ambiguity | Multiple target fields could upload to one room but report another | `rocketchat_send_file` rejects calls unless exactly one target is set |
+| Agent upload memory pressure | Local files are buffered before upload | Regular-file check plus `ROCKETCHAT_AGENT_FILE_MAX_BYTES`; file read runs off the event loop |
+| DM ghost rooms | An invalid username can yield a one-member DM | Verify `im.create.room.usernames` before uploading |
 
 ## Tools & Functions Reference
 
 **Transport:**
-- `connect()`, `disconnect()`, `_ws_loop()`, `_ws_connect_and_listen()`
+- `adapter.py`: `connect()`, `disconnect()`
+- `ddp.py`: `_ws_loop()`, `_ws_connect_and_listen()`, `_handle_ddp_frame()`
 
 **Send:**
 - `send(chat_id, text, msg_id)`, `send_image()`, `send_image_file()`, `send_document()`,
   `send_voice()`, `send_video()`, `send_typing()`, `stop_typing()`
 
 **Receive:**
-- `_handle_message(post)` — main inbound dispatch (1,160 lines)
-- `_handle_ddp_frame(event)` — DDP frame routing
+- `inbound.py`: `_handle_message(post)`, thread history and deferred attachments
 
 **Media:**
-- `_download_attachments()`, `_upload_file()`, `_convert_audio_to_mp3()`
+- `inbound.py`: `_download_attachments()`, `_convert_audio_to_mp3()`
+- `media.py`: `_upload_file()` and outbound media send helpers
+
+**Agent tools:**
+- `tools.py`: `handle_list_channels()`, `handle_create_channel()`, `handle_post()`,
+  `handle_send_file()`, `handle_dm()`
 
 **Reactions:**
 - `_add_reaction(msg_id, emoji)`, `_remove_reaction(msg_id, emoji)` — 👀✅❌
@@ -158,8 +193,9 @@ never exempt every thread globally.
 **Meta:**
 - `edit_message(chat_id, msg_id, text)`, `get_chat_info()`
 - `_sync_title_to_rc_topic()`, `_resolve_room_type()`
-- `format_message(content)` — RC-specific markdown (single `*` for bold)
-- `check_requirements()`, `validate_config()`, `_env_enablement()`
+- `adapter.py`: `format_message(content)` — Rocket.Chat-specific Markdown
+- `helpers.py`: `check_requirements()`, `validate_config()`, `_env_enablement()`,
+  `_standalone_send()`
 
 ## PR History
 
@@ -175,6 +211,7 @@ Parallel independent work: **PR #4637** (`@meron1122`, same plugin structure).
 | `84ddeb401` | RC-native slash command routing |
 | Various | Debug logging, reaction fixes, topic sync |
 | `433b7a15d` | **/status mid-sentence fix** (position 0 only) |
+| `f0bf51e` | Merge PR #1: agent-callable local file uploads |
 
 ## Testing
 

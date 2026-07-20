@@ -14,6 +14,21 @@ from typing import Any, Dict, Optional
 from tools.registry import tool_error, tool_result
 
 
+DEFAULT_MAX_AGENT_FILE_BYTES = 100 * 1024 * 1024
+
+
+def _max_agent_file_bytes() -> int:
+    """Return the local safety limit for agent-triggered uploads; 0 disables it."""
+    raw = os.getenv(
+        "ROCKETCHAT_AGENT_FILE_MAX_BYTES",
+        str(DEFAULT_MAX_AGENT_FILE_BYTES),
+    )
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_AGENT_FILE_BYTES
+
+
 async def _api(
     method: str,
     path: str,
@@ -140,15 +155,59 @@ async def handle_post(args: dict, **kw) -> str:
     )
 
 
+async def _upload_media(
+    room_id: str,
+    file_data: bytes,
+    filename: str,
+    content_type: str,
+) -> Dict[str, Any]:
+    """Upload bytes with ``rooms.media`` and return its JSON response."""
+    import aiohttp
+
+    url = os.getenv("ROCKETCHAT_URL", "").rstrip("/")
+    headers = {
+        "X-Auth-Token": os.getenv("ROCKETCHAT_TOKEN", ""),
+        "X-User-Id": os.getenv("ROCKETCHAT_USER_ID", ""),
+    }
+    form = aiohttp.FormData()
+    form.add_field(
+        "file",
+        file_data,
+        filename=filename,
+        content_type=content_type,
+    )
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=120)
+        ) as session:
+            async with session.post(
+                f"{url}/api/v1/rooms.media/{room_id}",
+                headers=headers,
+                data=form,
+            ) as resp:
+                if resp.status >= 400:
+                    body = await resp.text()
+                    return {"_error": f"HTTP {resp.status}: {body[:200]}"}
+                data = await resp.json(content_type=None)
+                if not isinstance(data, dict):
+                    return {"_error": "response was not a JSON object"}
+                if not data.get("success", True):
+                    return {"_error": str(data.get("error") or "upload rejected")}
+                return data
+    except Exception as exc:
+        return {"_error": str(exc)}
+
+
 async def handle_send_file(args: dict, **kw) -> str:
     """Upload a local file to a Rocket.Chat channel, group, or DM via rooms.media (two-step).
 
-    Target resolution priority:
+    Exactly one target is required:
       1. room_id  — exact room ID (preferred; from rocketchat_dm or rocketchat_list_channels)
       2. username — a REAL Rocket.Chat login (not a display name); resolved via im.create
-      3. channel  — channel/group name (resolved via channels.info)
+      3. channel  — channel/group name (resolved via rooms.info)
     Never construct or guess a room_id from a name. Pass a literal ID you already hold.
     """
+    import asyncio
     import mimetypes
     from pathlib import Path
 
@@ -157,18 +216,41 @@ async def handle_send_file(args: dict, **kw) -> str:
         return tool_error("file_path is required")
 
     p = Path(file_path)
-    if not p.exists():
-        return tool_error(f"File not found: {file_path}")
+    if not p.is_file():
+        return tool_error(f"File not found or not a regular file: {file_path}")
+    try:
+        file_size = p.stat().st_size
+    except OSError as exc:
+        return tool_error(f"Could not inspect file {file_path}: {exc}")
+    max_bytes = _max_agent_file_bytes()
+    if max_bytes and file_size > max_bytes:
+        return tool_error(
+            f"File is too large ({file_size} bytes; local limit is {max_bytes}). "
+            "Adjust ROCKETCHAT_AGENT_FILE_MAX_BYTES if the server accepts larger uploads."
+        )
 
     room_id = str(args.get("room_id") or "").strip()
     username = str(args.get("username") or "").strip().lstrip("@")
     channel = str(args.get("channel") or "").strip().lstrip("#")
 
-    if not room_id and not username and not channel:
+    targets = [value for value in (room_id, username, channel) if value]
+    if len(targets) != 1:
         return tool_error(
-            "One of room_id, username, or channel is required. "
+            "Exactly one of room_id, username, or channel is required. "
             "Use a literal room_id (from rocketchat_dm) or a real username — do not guess."
         )
+
+    requested_name = str(args.get("file_name") or "").strip()
+    fname = Path(requested_name).name if requested_name else p.name
+    if not fname:
+        return tool_error("file_name must contain a filename")
+    ct = mimetypes.guess_type(fname)[0] or "application/octet-stream"
+    try:
+        file_data = await asyncio.to_thread(p.read_bytes)
+    except OSError as exc:
+        return tool_error(f"Could not read file {file_path}: {exc}")
+    caption = str(args.get("caption") or "").strip() or None
+    tmid = str(args.get("tmid") or "").strip() or None
 
     # Resolve room_id from a real username via im.create (idempotent: reuses existing DM)
     if not room_id and username:
@@ -179,7 +261,8 @@ async def handle_send_file(args: dict, **kw) -> str:
         room_id = room.get("_id") or ""
         # Ghost-room guard: a valid DM must contain the target user + the bot (>= 2 members)
         members = room.get("usernames") or []
-        if len(members) < 2 or username not in members:
+        member_names = {str(member).casefold() for member in members}
+        if len(members) < 2 or username.casefold() not in member_names:
             return tool_error(
                 f"DM room for @{username} has no real recipient (members: {members}). "
                 f"The username is incorrect or the user does not exist — file not sent."
@@ -189,46 +272,17 @@ async def handle_send_file(args: dict, **kw) -> str:
 
     # Resolve room_id from channel name if needed
     if not room_id:
-        data = await _api("GET", "channels.info", params={"roomName": channel})
+        data = await _api("GET", "rooms.info", params={"roomName": channel})
         if "_error" in data:
-            return tool_error(f"Could not find channel #{channel}: {data['_error']}")
-        room_id = (data.get("channel") or {}).get("_id")
+            return tool_error(f"Could not find room #{channel}: {data['_error']}")
+        room_id = (data.get("room") or {}).get("_id")
         if not room_id:
-            return tool_error(f"Channel #{channel} returned no room id")
-
-    # Prepare file data
-    fname = str(args.get("file_name") or "").strip() or p.name
-    ct = mimetypes.guess_type(fname)[0] or "application/octet-stream"
-    file_data = p.read_bytes()
-    caption = str(args.get("caption") or "").strip() or None
-    tmid = str(args.get("tmid") or "").strip() or None
-
-    # Two-step rooms.media upload
-    import aiohttp
-
-    url = os.getenv("ROCKETCHAT_URL", "").rstrip("/")
-    headers = {
-        "X-Auth-Token": os.getenv("ROCKETCHAT_TOKEN", ""),
-        "X-User-Id": os.getenv("ROCKETCHAT_USER_ID", ""),
-    }
+            return tool_error(f"Room #{channel} returned no room id")
 
     # Step 1: upload bytes
-    step1_url = f"{url}/api/v1/rooms.media/{room_id}"
-    form = aiohttp.FormData()
-    form.add_field("file", file_data, filename=fname, content_type=ct)
-    try:
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=120)
-        ) as session:
-            async with session.post(
-                step1_url, headers=headers, data=form
-            ) as resp:
-                if resp.status >= 400:
-                    body = await resp.text()
-                    return tool_error(f"Upload step 1 failed ({resp.status}): {body[:200]}")
-                step1 = await resp.json()
-    except Exception as exc:
-        return tool_error(f"Upload step 1 error: {exc}")
+    step1 = await _upload_media(room_id, file_data, fname, ct)
+    if "_error" in step1:
+        return tool_error(f"Upload step 1 failed: {step1['_error']}")
 
     file_id = (step1.get("file") or {}).get("_id")
     if not file_id:
@@ -250,14 +304,17 @@ async def handle_send_file(args: dict, **kw) -> str:
         return tool_error(f"Upload step 2 failed: {step2_data['_error']}")
 
     msg = step2_data.get("message") or {}
+    message_id = msg.get("_id")
+    if not message_id:
+        return tool_error("Upload step 2 returned no message id")
     target = f"@{username}" if username else (f"#{channel}" if channel else room_id)
     return tool_result(
         sent=True,
         target=target,
         room_id=room_id,
-        message_id=msg.get("_id"),
+        message_id=message_id,
         file=fname,
-        size=len(file_data),
+        size=file_size,
     )
 
 
@@ -380,9 +437,9 @@ SEND_FILE_SCHEMA = {
     "name": "rocketchat_send_file",
     "description": (
         "Upload a local file to a Rocket.Chat channel, group, or DM. "
-        "Uses the two-step rooms.media flow — no size limit beyond server config. "
+        "Uses the two-step rooms.media flow and follows the server/proxy upload limits. "
         "Returns the message_id of the created file message. "
-        "TARGET (pick ONE, in priority order): "
+        "TARGET (pick EXACTLY ONE): "
         "1) room_id — the exact room ID you already hold (from rocketchat_dm or "
         "rocketchat_list_channels). PREFERRED. "
         "2) username — a REAL Rocket.Chat login (e.g. 'younesamalou'), NOT a display name. "

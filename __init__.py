@@ -29,6 +29,7 @@ Environment variables:
     ROCKETCHAT_FREE_RESPONSE_CHANNELS  Rooms exempt from mention requirement
     ROCKETCHAT_REPLY_MODE       Channel/group replies: 'thread' or 'off' (default: off)
     ROCKETCHAT_REACTIONS        Add 👀/✅/❌ reactions to messages (default: true)
+    ROCKETCHAT_AGENT_FILE_MAX_BYTES  Agent-tool upload guard (default: 100 MiB; 0 disables)
 """
 
 from .adapter import RocketchatAdapter

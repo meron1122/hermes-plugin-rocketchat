@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import yaml
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platform_registry import PlatformEntry, platform_registry
@@ -1094,12 +1095,303 @@ class TestAgentTools:
             "rocketchat_list_channels",
             "rocketchat_create_channel",
             "rocketchat_post",
+            "rocketchat_send_file",
             "rocketchat_dm",
         }
         assert {c[1]["toolset"] for c in ctx.register_tool.call_args_list} == {
             "rocketchat"
         }
         assert all(c[1]["is_async"] for c in ctx.register_tool.call_args_list)
+
+    def test_manifest_lists_every_registered_tool(self):
+        ctx = MagicMock()
+        register(ctx)
+        registered = {c[1]["name"] for c in ctx.register_tool.call_args_list}
+        manifest_path = Path(__file__).resolve().parents[1] / "plugin.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text())
+        assert set(manifest["provides_tools"]) == registered
+
+    @pytest.mark.asyncio
+    async def test_send_file_requires_regular_file_and_exactly_one_target(
+        self, tmp_path
+    ):
+        missing = json.loads(await _tools.handle_send_file({}))
+        assert "file_path is required" in missing["error"]
+
+        directory = json.loads(await _tools.handle_send_file({
+            "file_path": str(tmp_path),
+            "room_id": "r1",
+        }))
+        assert "not a regular file" in directory["error"]
+
+        file_path = tmp_path / "report.txt"
+        file_path.write_text("hello")
+        no_target = json.loads(await _tools.handle_send_file({
+            "file_path": str(file_path),
+        }))
+        assert "Exactly one" in no_target["error"]
+
+        conflicting = json.loads(await _tools.handle_send_file({
+            "file_path": str(file_path),
+            "room_id": "r1",
+            "username": "zed",
+        }))
+        assert "Exactly one" in conflicting["error"]
+
+    @pytest.mark.asyncio
+    async def test_send_file_enforces_local_size_guard(self, tmp_path, monkeypatch):
+        file_path = tmp_path / "large.bin"
+        file_path.write_bytes(b"123")
+        monkeypatch.setenv("ROCKETCHAT_AGENT_FILE_MAX_BYTES", "2")
+        out = json.loads(await _tools.handle_send_file({
+            "file_path": str(file_path),
+            "room_id": "r1",
+        }))
+        assert "too large" in out["error"]
+        assert "local limit is 2" in out["error"]
+
+    @pytest.mark.asyncio
+    async def test_send_file_by_room_id_with_caption_filename_and_thread(
+        self, tmp_path, monkeypatch
+    ):
+        file_path = tmp_path / "source.bin"
+        file_path.write_bytes(b"pdf-data")
+        seen = {}
+
+        async def fake_upload(room_id, file_data, filename, content_type):
+            seen["upload"] = (room_id, file_data, filename, content_type)
+            return {"file": {"_id": "f1"}}
+
+        async def fake_api(method, path, **kw):
+            seen["confirm"] = (method, path, kw.get("payload"))
+            return {"message": {"_id": "m1"}}
+
+        monkeypatch.setattr(_tools, "_upload_media", fake_upload)
+        monkeypatch.setattr(_tools, "_api", fake_api)
+        out = json.loads(await _tools.handle_send_file({
+            "file_path": str(file_path),
+            "room_id": "r7",
+            "file_name": "report.pdf",
+            "caption": "Sprint report",
+            "tmid": "thread-root",
+        }))
+
+        assert seen["upload"] == (
+            "r7", b"pdf-data", "report.pdf", "application/pdf"
+        )
+        assert seen["confirm"] == (
+            "POST",
+            "rooms.mediaConfirm/r7/f1",
+            {"msg": "Sprint report", "tmid": "thread-root"},
+        )
+        assert out == {
+            "sent": True,
+            "target": "r7",
+            "room_id": "r7",
+            "message_id": "m1",
+            "file": "report.pdf",
+            "size": 8,
+        }
+
+    @pytest.mark.asyncio
+    async def test_send_file_resolves_public_or_private_room_name(
+        self, tmp_path, monkeypatch
+    ):
+        file_path = tmp_path / "artifact.unknown-extension"
+        file_path.write_bytes(b"data")
+        calls = []
+
+        async def fake_upload(room_id, file_data, filename, content_type):
+            calls.append(("upload", room_id, content_type))
+            return {"file": {"_id": "f2"}}
+
+        async def fake_api(method, path, **kw):
+            calls.append((method, path, kw))
+            if path == "rooms.info":
+                assert kw["params"] == {"roomName": "private-reports"}
+                return {"room": {"_id": "g9", "t": "p"}}
+            return {"message": {"_id": "m2"}}
+
+        monkeypatch.setattr(_tools, "_upload_media", fake_upload)
+        monkeypatch.setattr(_tools, "_api", fake_api)
+        out = json.loads(await _tools.handle_send_file({
+            "file_path": str(file_path),
+            "channel": "#private-reports",
+        }))
+
+        assert ("upload", "g9", "application/octet-stream") in calls
+        assert out["target"] == "#private-reports"
+        assert out["room_id"] == "g9"
+
+    @pytest.mark.asyncio
+    async def test_send_file_to_dm_accepts_username_case_insensitively(
+        self, tmp_path, monkeypatch
+    ):
+        file_path = tmp_path / "report.txt"
+        file_path.write_text("hello")
+        uploaded_to = []
+
+        async def fake_upload(room_id, file_data, filename, content_type):
+            uploaded_to.append(room_id)
+            return {"file": {"_id": "f3"}}
+
+        async def fake_api(method, path, **kw):
+            if path == "im.create":
+                assert kw["payload"] == {"username": "zed"}
+                return {
+                    "room": {
+                        "_id": "dm42",
+                        "usernames": ["hermesbot", "Zed"],
+                    }
+                }
+            return {"message": {"_id": "m3"}}
+
+        monkeypatch.setattr(_tools, "_upload_media", fake_upload)
+        monkeypatch.setattr(_tools, "_api", fake_api)
+        out = json.loads(await _tools.handle_send_file({
+            "file_path": str(file_path),
+            "username": "@zed",
+        }))
+
+        assert uploaded_to == ["dm42"]
+        assert out["target"] == "@zed"
+
+    @pytest.mark.parametrize(
+        "members",
+        [["hermesbot"], ["hermesbot", "someone-else"]],
+    )
+    @pytest.mark.asyncio
+    async def test_send_file_rejects_ghost_dm(
+        self, members, tmp_path, monkeypatch
+    ):
+        file_path = tmp_path / "report.txt"
+        file_path.write_text("hello")
+        upload = AsyncMock()
+
+        async def fake_api(method, path, **kw):
+            return {"room": {"_id": "ghost", "usernames": members}}
+
+        monkeypatch.setattr(_tools, "_upload_media", upload)
+        monkeypatch.setattr(_tools, "_api", fake_api)
+        out = json.loads(await _tools.handle_send_file({
+            "file_path": str(file_path),
+            "username": "zed",
+        }))
+
+        assert "no real recipient" in out["error"]
+        upload.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_send_file_surfaces_upload_and_confirmation_failures(
+        self, tmp_path, monkeypatch
+    ):
+        file_path = tmp_path / "report.txt"
+        file_path.write_text("hello")
+
+        async def upload_error(*args):
+            return {"_error": "HTTP 413: too large"}
+
+        monkeypatch.setattr(_tools, "_upload_media", upload_error)
+        first = json.loads(await _tools.handle_send_file({
+            "file_path": str(file_path),
+            "room_id": "r1",
+        }))
+        assert "HTTP 413" in first["error"]
+
+        async def upload_without_id(*args):
+            return {"file": {}}
+
+        monkeypatch.setattr(_tools, "_upload_media", upload_without_id)
+        missing_file_id = json.loads(await _tools.handle_send_file({
+            "file_path": str(file_path),
+            "room_id": "r1",
+        }))
+        assert "no file id" in missing_file_id["error"]
+
+        async def upload_ok(*args):
+            return {"file": {"_id": "f1"}}
+
+        async def confirm_error(method, path, **kw):
+            return {"_error": "not-allowed"}
+
+        monkeypatch.setattr(_tools, "_upload_media", upload_ok)
+        monkeypatch.setattr(_tools, "_api", confirm_error)
+        second = json.loads(await _tools.handle_send_file({
+            "file_path": str(file_path),
+            "room_id": "r1",
+        }))
+        assert "not-allowed" in second["error"]
+
+        async def confirm_without_message_id(method, path, **kw):
+            return {"message": {}}
+
+        monkeypatch.setattr(_tools, "_api", confirm_without_message_id)
+        missing_message_id = json.loads(await _tools.handle_send_file({
+            "file_path": str(file_path),
+            "room_id": "r1",
+        }))
+        assert "no message id" in missing_message_id["error"]
+
+    @pytest.mark.asyncio
+    async def test_upload_media_builds_authenticated_multipart(self, monkeypatch):
+        import aiohttp
+
+        form = MagicMock()
+        captured = {}
+
+        class FakeResponse:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            async def json(self, **kw):
+                return {"file": {"_id": "f1"}, "success": True}
+
+            async def text(self):
+                return ""
+
+        class FakeSession:
+            def __init__(self, **kw):
+                captured["session"] = kw
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            def post(self, url, **kw):
+                captured["post"] = (url, kw)
+                return FakeResponse()
+
+        monkeypatch.setattr(aiohttp, "FormData", lambda: form)
+        monkeypatch.setattr(aiohttp, "ClientSession", FakeSession)
+        monkeypatch.setenv("ROCKETCHAT_URL", "https://rc.example.com/")
+        monkeypatch.setenv("ROCKETCHAT_TOKEN", "token")
+        monkeypatch.setenv("ROCKETCHAT_USER_ID", "bot-id")
+
+        out = await _tools._upload_media(
+            "r1", b"contents", "report.pdf", "application/pdf"
+        )
+
+        assert out["file"]["_id"] == "f1"
+        form.add_field.assert_called_once_with(
+            "file",
+            b"contents",
+            filename="report.pdf",
+            content_type="application/pdf",
+        )
+        url, request = captured["post"]
+        assert url == "https://rc.example.com/api/v1/rooms.media/r1"
+        assert request["headers"] == {
+            "X-Auth-Token": "token",
+            "X-User-Id": "bot-id",
+        }
+        assert request["data"] is form
 
     @pytest.mark.asyncio
     async def test_dm_without_message_returns_room_id(self, monkeypatch):
