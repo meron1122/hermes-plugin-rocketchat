@@ -1,4 +1,4 @@
-"""Agent tools: channel discovery/creation and direct messages.
+"""Agent tools: channel discovery/creation, direct messages, and file uploads.
 
 Registered into the ``rocketchat`` toolset (see ``register()`` in
 ``__init__.py``), which the gateway auto-includes for Rocket.Chat
@@ -140,6 +140,127 @@ async def handle_post(args: dict, **kw) -> str:
     )
 
 
+async def handle_send_file(args: dict, **kw) -> str:
+    """Upload a local file to a Rocket.Chat channel, group, or DM via rooms.media (two-step).
+
+    Target resolution priority:
+      1. room_id  — exact room ID (preferred; from rocketchat_dm or rocketchat_list_channels)
+      2. username — a REAL Rocket.Chat login (not a display name); resolved via im.create
+      3. channel  — channel/group name (resolved via channels.info)
+    Never construct or guess a room_id from a name. Pass a literal ID you already hold.
+    """
+    import mimetypes
+    from pathlib import Path
+
+    file_path = str(args.get("file_path") or "").strip()
+    if not file_path:
+        return tool_error("file_path is required")
+
+    p = Path(file_path)
+    if not p.exists():
+        return tool_error(f"File not found: {file_path}")
+
+    room_id = str(args.get("room_id") or "").strip()
+    username = str(args.get("username") or "").strip().lstrip("@")
+    channel = str(args.get("channel") or "").strip().lstrip("#")
+
+    if not room_id and not username and not channel:
+        return tool_error(
+            "One of room_id, username, or channel is required. "
+            "Use a literal room_id (from rocketchat_dm) or a real username — do not guess."
+        )
+
+    # Resolve room_id from a real username via im.create (idempotent: reuses existing DM)
+    if not room_id and username:
+        data = await _api("POST", "im.create", payload={"username": username})
+        if "_error" in data:
+            return tool_error(f"Could not open DM with @{username}: {data['_error']}")
+        room = data.get("room") or {}
+        room_id = room.get("_id") or ""
+        # Ghost-room guard: a valid DM must contain the target user + the bot (>= 2 members)
+        members = room.get("usernames") or []
+        if len(members) < 2 or username not in members:
+            return tool_error(
+                f"DM room for @{username} has no real recipient (members: {members}). "
+                f"The username is incorrect or the user does not exist — file not sent."
+            )
+        if not room_id:
+            return tool_error(f"im.create returned no room id for @{username}")
+
+    # Resolve room_id from channel name if needed
+    if not room_id:
+        data = await _api("GET", "channels.info", params={"roomName": channel})
+        if "_error" in data:
+            return tool_error(f"Could not find channel #{channel}: {data['_error']}")
+        room_id = (data.get("channel") or {}).get("_id")
+        if not room_id:
+            return tool_error(f"Channel #{channel} returned no room id")
+
+    # Prepare file data
+    fname = str(args.get("file_name") or "").strip() or p.name
+    ct = mimetypes.guess_type(fname)[0] or "application/octet-stream"
+    file_data = p.read_bytes()
+    caption = str(args.get("caption") or "").strip() or None
+    tmid = str(args.get("tmid") or "").strip() or None
+
+    # Two-step rooms.media upload
+    import aiohttp
+
+    url = os.getenv("ROCKETCHAT_URL", "").rstrip("/")
+    headers = {
+        "X-Auth-Token": os.getenv("ROCKETCHAT_TOKEN", ""),
+        "X-User-Id": os.getenv("ROCKETCHAT_USER_ID", ""),
+    }
+
+    # Step 1: upload bytes
+    step1_url = f"{url}/api/v1/rooms.media/{room_id}"
+    form = aiohttp.FormData()
+    form.add_field("file", file_data, filename=fname, content_type=ct)
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=120)
+        ) as session:
+            async with session.post(
+                step1_url, headers=headers, data=form
+            ) as resp:
+                if resp.status >= 400:
+                    body = await resp.text()
+                    return tool_error(f"Upload step 1 failed ({resp.status}): {body[:200]}")
+                step1 = await resp.json()
+    except Exception as exc:
+        return tool_error(f"Upload step 1 error: {exc}")
+
+    file_id = (step1.get("file") or {}).get("_id")
+    if not file_id:
+        return tool_error(f"Upload step 1 returned no file id: {step1}")
+
+    # Step 2: confirm + create message
+    step2_payload: Dict[str, Any] = {}
+    if caption:
+        step2_payload["msg"] = caption
+    if tmid:
+        step2_payload["tmid"] = tmid
+
+    step2_data = await _api(
+        "POST",
+        f"rooms.mediaConfirm/{room_id}/{file_id}",
+        payload=step2_payload,
+    )
+    if "_error" in step2_data:
+        return tool_error(f"Upload step 2 failed: {step2_data['_error']}")
+
+    msg = step2_data.get("message") or {}
+    target = f"@{username}" if username else (f"#{channel}" if channel else room_id)
+    return tool_result(
+        sent=True,
+        target=target,
+        room_id=room_id,
+        message_id=msg.get("_id"),
+        file=fname,
+        size=len(file_data),
+    )
+
+
 async def handle_dm(args: dict, **kw) -> str:
     """Open (or reuse) a DM room with a user; optionally send a message."""
     username = str(args.get("username") or "").strip().lstrip("@")
@@ -255,6 +376,63 @@ POST_SCHEMA = {
     },
 }
 
+SEND_FILE_SCHEMA = {
+    "name": "rocketchat_send_file",
+    "description": (
+        "Upload a local file to a Rocket.Chat channel, group, or DM. "
+        "Uses the two-step rooms.media flow — no size limit beyond server config. "
+        "Returns the message_id of the created file message. "
+        "TARGET (pick ONE, in priority order): "
+        "1) room_id — the exact room ID you already hold (from rocketchat_dm or "
+        "rocketchat_list_channels). PREFERRED. "
+        "2) username — a REAL Rocket.Chat login (e.g. 'younesamalou'), NOT a display name. "
+        "3) channel — a channel/group name. "
+        "NEVER guess or construct a room_id from a name; pass a literal ID you received."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "file_path": {
+                "type": "string",
+                "description": "Absolute path to the local file to upload",
+            },
+            "room_id": {
+                "type": "string",
+                "description": (
+                    "Exact room ID (takes precedence over username/channel). "
+                    "Use the literal ID returned by rocketchat_dm or rocketchat_list_channels — "
+                    "do not invent or derive it from a username."
+                ),
+            },
+            "username": {
+                "type": "string",
+                "description": (
+                    "Target user's REAL Rocket.Chat login (no leading @), e.g. 'younesamalou'. "
+                    "Must be an actual username, not a display name. Resolved via im.create; "
+                    "the send is rejected if the user does not exist."
+                ),
+            },
+            "channel": {
+                "type": "string",
+                "description": "Channel/group name, e.g. '#reports' or 'reports'",
+            },
+            "caption": {
+                "type": "string",
+                "description": "Optional message text to attach to the file",
+            },
+            "file_name": {
+                "type": "string",
+                "description": "Override the displayed filename (default: basename of file_path)",
+            },
+            "tmid": {
+                "type": "string",
+                "description": "Optional thread root message id — file will be posted inside that thread",
+            },
+        },
+        "required": ["file_path"],
+    },
+}
+
 DM_SCHEMA = {
     "name": "rocketchat_dm",
     "description": (
@@ -284,5 +462,6 @@ TOOLS = (
     ("rocketchat_list_channels", LIST_CHANNELS_SCHEMA, handle_list_channels, "📋"),
     ("rocketchat_create_channel", CREATE_CHANNEL_SCHEMA, handle_create_channel, "➕"),
     ("rocketchat_post", POST_SCHEMA, handle_post, "📣"),
+    ("rocketchat_send_file", SEND_FILE_SCHEMA, handle_send_file, "📎"),
     ("rocketchat_dm", DM_SCHEMA, handle_dm, "✉️"),
 )
