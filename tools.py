@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import stat
 import threading
 import time
@@ -64,6 +65,14 @@ _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
 _CONTEXTLESS_PLATFORMS = {"", "cli", "local", "cron"}
 _ROOM_TYPE_NAMES = {"c": "channel", "p": "group", "d": "dm"}
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b([a-z0-9_-]*(?:api[_-]?key|token|secret|password|passwd|authorization)"
+    r"[a-z0-9_-]*)\s*([=:]\s*)([^\s&;,]+)"
+)
+_AUTH_SCHEME_RE = re.compile(
+    r"(?i)\b(bearer|basic)\s+[a-z0-9._~+/=-]{6,}"
+)
+_OPENAI_KEY_RE = re.compile(r"\bsk-[a-zA-Z0-9_-]{16,}")
 
 _rate_lock = threading.Lock()
 _rate_state: Dict[str, tuple[float, float]] = {}
@@ -387,6 +396,11 @@ def _clean_output_text(value: Any) -> str:
         or char in {"\n", "\t"}
     )
     if _env_bool("ROCKETCHAT_RETRIEVAL_REDACT_SECRETS", True):
+        # Keep a small deterministic floor independent of the installed Hermes
+        # redactor version; the core redactor below adds broader heuristics.
+        text = _AUTH_SCHEME_RE.sub(r"\1 [REDACTED]", text)
+        text = _SECRET_ASSIGNMENT_RE.sub(r"\1\2[REDACTED]", text)
+        text = _OPENAI_KEY_RE.sub("[REDACTED]", text)
         try:
             from agent.redact import redact_sensitive_text
 
