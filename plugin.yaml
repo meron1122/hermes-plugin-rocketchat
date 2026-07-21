@@ -61,6 +61,98 @@ optional_env:
     prompt: "Reply mode (thread / off)"
     password: false
   - name: ROCKETCHAT_AGENT_FILE_MAX_BYTES
-    description: "Maximum local file size for agent-triggered uploads in bytes; 0 disables the guard (default: 104857600)"
+    description: "Maximum local file size for agent-triggered uploads in bytes; only literal 0 disables the guard (default: 104857600)"
     prompt: "Agent file upload limit in bytes (0 for unlimited)"
+    password: false
+  - name: ROCKETCHAT_AGENT_FILE_UPLOADS
+    description: "Enable agent-triggered local file uploads in addition to write tools (default: false)"
+    prompt: "Enable agent file uploads? (true/false)"
+    password: false
+  - name: ROCKETCHAT_AGENT_FILE_ALLOWED_ROOTS
+    description: "Absolute directories from which agent tools may upload files, separated by the operating-system path separator"
+    prompt: "Allowed agent file upload roots"
+    password: false
+  - name: ROCKETCHAT_AGENT_FILE_MAX_CONCURRENCY
+    description: "Maximum concurrent local file read/upload operations, from 1 to 4 (default: 1)"
+    prompt: "Maximum concurrent agent file uploads"
+    password: false
+  - name: ROCKETCHAT_RETRIEVAL_ALLOWED_ROOMS
+    description: "Comma-separated room IDs eligible for cross-room retrieval; requester must also be trusted"
+    prompt: "Cross-room retrieval room IDs (comma-separated)"
+    password: false
+  - name: ROCKETCHAT_RETRIEVAL_TRUSTED_USERS
+    description: "Comma-separated Rocket.Chat user IDs allowed to request cross-room retrieval"
+    prompt: "Trusted cross-room retrieval user IDs (comma-separated)"
+    password: false
+  - name: ROCKETCHAT_RETRIEVAL_ALLOW_CONTEXTLESS
+    description: "Allow contextless retrieval only from exactly allowlisted rooms (default: false)"
+    prompt: "Allow contextless retrieval? (true/false)"
+    password: false
+  - name: ROCKETCHAT_AGENT_WRITE_TOOLS
+    description: "Enable agent-callable create/post/upload/DM tools (default: false)"
+    prompt: "Enable Rocket.Chat write tools? (true/false)"
+    password: false
+  - name: ROCKETCHAT_AGENT_WRITE_ALLOWED_ROOMS
+    description: "Exact room IDs eligible for cross-room writes; requester must also be trusted"
+    prompt: "Cross-room write room IDs (comma-separated)"
+    password: false
+  - name: ROCKETCHAT_AGENT_WRITE_TRUSTED_USERS
+    description: "Exact user IDs trusted for privileged and cross-room writes"
+    prompt: "Trusted write user IDs (comma-separated)"
+    password: false
+  - name: ROCKETCHAT_AGENT_TOOLS_ALLOW_EXTERNAL
+    description: "Allow enabled Rocket.Chat write tools from non-Rocket.Chat/contextless sessions (default: false)"
+    prompt: "Allow write tools from external platforms? (true/false)"
+    password: false
+  - name: ROCKETCHAT_ALLOW_INSECURE_HTTP
+    description: "Allow a plain HTTP Rocket.Chat URL; use only on a trusted local network (default: false)"
+    prompt: "Allow insecure HTTP? (true/false)"
+    password: false
+  - name: ROCKETCHAT_AGENT_RESPONSE_MAX_BYTES
+    description: "Maximum JSON body for every Rocket.Chat REST response, from 65536 to 16777216 (default: 2097152)"
+    prompt: "Maximum API response bytes"
+    password: false
+  - name: ROCKETCHAT_AGENT_MAX_CONCURRENCY
+    description: "Maximum concurrent agent REST calls (default: 4)"
+    prompt: "Maximum concurrent agent API calls"
+    password: false
+  - name: ROCKETCHAT_AGENT_REQUESTS_PER_MINUTE
+    description: "Per-process agent REST request limit per minute (default: 120)"
+    prompt: "Agent API requests per minute"
+    password: false
+  - name: ROCKETCHAT_RETRIEVAL_REDACT_SECRETS
+    description: "Redact common secret patterns from retrieval results (default: true)"
+    prompt: "Redact secrets in retrieval results? (true/false)"
+    password: false
+  - name: ROCKETCHAT_RETRIEVAL_INCLUDE_FILE_URLS
+    description: "Include attachment URLs in retrieval output (default: false)"
+    prompt: "Include file URLs in retrieval output? (true/false)"
+    password: false
+  - name: ROCKETCHAT_RETRIEVAL_INCLUDE_REACTION_IDENTITIES
+    description: "Include usernames behind reactions in retrieval output (default: false)"
+    prompt: "Include reaction identities? (true/false)"
+    password: false
+  - name: ROCKETCHAT_RETRIEVAL_INCLUDE_USER_IDS
+    description: "Include stable Rocket.Chat user IDs in retrieval output (default: false)"
+    prompt: "Include user IDs in retrieval output? (true/false)"
+    password: false
+  - name: ROCKETCHAT_RETRIEVAL_MAX_RESULT_CHARS
+    description: "Maximum serialized retrieval result size in characters, from 4096 to 500000 (default: 75000)"
+    prompt: "Maximum retrieval result characters"
+    password: false
+  - name: ROCKETCHAT_THREAD_CONTEXT_MAX_CHARS
+    description: "Maximum untrusted Rocket.Chat thread context injected into one inbound turn (default: 20000)"
+    prompt: "Maximum inbound thread context characters"
+    password: false
+  - name: ROCKETCHAT_MEDIA_DOWNLOAD_MAX_BYTES
+    description: "Maximum total inbound attachment bytes per event and outbound URL-media body (default: 104857600; hard cap: 1073741824)"
+    prompt: "Maximum network media download bytes"
+    password: false
+  - name: ROCKETCHAT_FORWARDED_SLASH_COMMANDS
+    description: "Exact RC-native slash commands that trusted writers may forward through commands.run"
+    prompt: "Forwarded slash commands (comma-separated)"
+    password: false
+  - name: ROCKETCHAT_TOPIC_SYNC
+    description: "Enable Hermes title to Rocket.Chat topic writes (default: false)"
+    prompt: "Enable topic sync? (true/false)"
     password: false

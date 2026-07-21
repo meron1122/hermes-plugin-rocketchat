@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import uuid
 from typing import Any, Dict, List
 
@@ -14,6 +13,8 @@ from .helpers import (
     _RECONNECT_BASE_DELAY,
     _RECONNECT_JITTER,
     _RECONNECT_MAX_DELAY,
+    websocket_endpoint_matches,
+    websocket_url,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,9 +71,16 @@ class DdpTransportMixin:
                     return
                 err_str = str(exc).lower()
                 if "401" in err_str or "403" in err_str or "unauthorized" in err_str:
-                    logger.error("Rocket.Chat WS permanent error: %s — stopping reconnect", exc)
+                    logger.error(
+                        "Rocket.Chat WS permanent error (%s) — stopping reconnect",
+                        type(exc).__name__,
+                    )
                     return
-                logger.warning("Rocket.Chat WS error: %s — reconnecting in %.0fs", exc, delay)
+                logger.warning(
+                    "Rocket.Chat WS error (%s) — reconnecting in %.0fs",
+                    type(exc).__name__,
+                    delay,
+                )
 
             if self._closing:
                 return
@@ -84,10 +92,16 @@ class DdpTransportMixin:
 
     async def _ws_connect_and_listen(self) -> None:
         """Single DDP WebSocket session: connect, login, subscribe, listen."""
-        ws_url = re.sub(r"^http", "ws", self._base_url) + "/websocket"
+        ws_url = websocket_url(self._base_url)
         logger.info("Rocket.Chat: DDP connecting to %s", ws_url)
 
         self._ws = await self._session.ws_connect(ws_url, heartbeat=None)
+        response = getattr(self._ws, "_response", None)
+        final_url = getattr(response, "url", None)
+        if not websocket_endpoint_matches(ws_url, final_url):
+            await self._ws.close()
+            self._ws = None
+            raise RuntimeError("Rocket.Chat WebSocket endpoint changed")
         self._ddp_subs.clear()
 
         await self._ddp_send({
@@ -138,7 +152,7 @@ class DdpTransportMixin:
             err = event.get("error") or {}
             self._ddp_subs.pop(sub_id, None)
             if err:
-                logger.warning("Rocket.Chat: sub %s rejected: %s", sub_id, err)
+                logger.warning("Rocket.Chat: DDP subscription was rejected")
             return
 
         if kind == "changed":

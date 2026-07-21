@@ -18,7 +18,13 @@ from gateway.platforms.base import BasePlatformAdapter, SendResult
 from gateway.platforms.helpers import MessageDeduplicator
 
 from .ddp import DdpTransportMixin
-from .helpers import MAX_MESSAGE_LENGTH, _ROOM_TYPE_MAP
+from .helpers import (
+    MAX_MESSAGE_LENGTH,
+    _ROOM_TYPE_MAP,
+    is_valid_server_identifier,
+    read_bounded_json_response,
+    validate_auth_config,
+)
 from .inbound import InboundMixin
 from .media import MediaMixin
 
@@ -109,22 +115,42 @@ class RocketchatAdapter(
             "Content-Type": "application/json",
         }
 
+    def _validate_auth_config(self) -> bool:
+        """Validate the PAT target before any authenticated network access."""
+        try:
+            self._base_url, self._token, self._bot_user_id = (
+                validate_auth_config(
+                    self._base_url, self._token, self._bot_user_id
+                )
+            )
+            return True
+        except ValueError:
+            logger.error("Rocket.Chat configuration is invalid")
+            return False
+
     async def _api_get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """GET /api/v1/{path}."""
         import aiohttp
+        if not self._validate_auth_config():
+            return {}
         url = f"{self._base_url}/api/v1/{path.lstrip('/')}"
         try:
             async with self._session.get(
                 url, headers=self._headers(), params=params,
                 timeout=aiohttp.ClientTimeout(total=30),
+                allow_redirects=False,
             ) as resp:
-                if resp.status >= 400:
-                    body = await resp.text()
-                    logger.error("RC API GET %s → %s: %s", path, resp.status, body[:200])
+                if resp.status < 200 or resp.status >= 300:
+                    logger.error("RC API GET rejected with HTTP %s", resp.status)
                     return {}
-                return await resp.json()
-        except aiohttp.ClientError as exc:
-            logger.error("RC API GET %s network error: %s", path, exc)
+                return await read_bounded_json_response(resp)
+        except (
+            aiohttp.ClientError,
+            asyncio.TimeoutError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            logger.error("RC API GET failed (%s)", type(exc).__name__)
             return {}
 
     async def _api_post(
@@ -132,19 +158,26 @@ class RocketchatAdapter(
     ) -> Dict[str, Any]:
         """POST /api/v1/{path} with JSON body."""
         import aiohttp
+        if not self._validate_auth_config():
+            return {}
         url = f"{self._base_url}/api/v1/{path.lstrip('/')}"
         try:
             async with self._session.post(
                 url, headers=self._headers(), json=payload,
                 timeout=aiohttp.ClientTimeout(total=30),
+                allow_redirects=False,
             ) as resp:
-                if resp.status >= 400:
-                    body = await resp.text()
-                    logger.error("RC API POST %s → %s: %s", path, resp.status, body[:200])
+                if resp.status < 200 or resp.status >= 300:
+                    logger.error("RC API POST rejected with HTTP %s", resp.status)
                     return {}
-                return await resp.json()
-        except aiohttp.ClientError as exc:
-            logger.error("RC API POST %s network error: %s", path, exc)
+                return await read_bounded_json_response(resp)
+        except (
+            aiohttp.ClientError,
+            asyncio.TimeoutError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            logger.error("RC API POST failed (%s)", type(exc).__name__)
             return {}
 
     # ------------------------------------------------------------------
@@ -160,12 +193,11 @@ class RocketchatAdapter(
         """
         import aiohttp
 
-        if not self._base_url or not self._token or not self._bot_user_id:
-            logger.error("Rocket.Chat: URL, token, or user id not configured")
+        if not self._validate_auth_config():
             return False
 
         self._session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=30)
+            timeout=aiohttp.ClientTimeout(total=30), trust_env=False
         )
         self._closing = False
 
@@ -286,21 +318,35 @@ class RocketchatAdapter(
                 payload["tmid"] = thread_target
 
             data = await self._api_post("chat.postMessage", payload)
-            if not data or not data.get("success"):
+            if not isinstance(data, dict) or data.get("success") is not True:
                 return SendResult(success=False, error="Failed to post message")
-            msg = data.get("message") or {}
-            last_id = msg.get("_id") or last_id
-            if msg:
-                logger.info("Rocket.Chat: send() POST chat.postMessage → rid=%s tmid=%s msg_id=%s",
-                            msg.get("rid"), msg.get("tmid"), msg.get("_id"))
+            msg = data.get("message")
+            returned_tmid = msg.get("tmid") if isinstance(msg, dict) else None
+            if (
+                not isinstance(msg, dict)
+                or not is_valid_server_identifier(msg.get("_id"))
+                or msg.get("rid") != chat_id
+                or (returned_tmid or None) != (thread_target or None)
+            ):
+                return SendResult(
+                    success=False, error="Rocket.Chat returned an invalid message target"
+                )
+            last_id = msg["_id"]
+            logger.info(
+                "Rocket.Chat: send() POST chat.postMessage → rid=%s tmid=%s msg_id=%s",
+                msg.get("rid"),
+                msg.get("tmid"),
+                msg.get("_id"),
+            )
 
         # After sending, sync session title → RC topic for DMs.
         # This fires on every outgoing message but is rate-limited and
         # short-circuits when the title hasn't changed.
-        try:
-            await self._sync_title_to_rc_topic(chat_id)
-        except Exception:
-            logger.debug("Title sync failed in send()", exc_info=True)
+        if self._topic_sync_enabled():
+            try:
+                await self._sync_title_to_rc_topic(chat_id)
+            except Exception:
+                logger.debug("Title sync failed in send()", exc_info=True)
 
         return SendResult(success=True, message_id=last_id)
 
@@ -312,6 +358,16 @@ class RocketchatAdapter(
             "channel": "channels.setTopic",
             "group": "groups.setTopic",
         }.get(chat_type, "channels.setTopic")
+
+    @staticmethod
+    def _topic_sync_enabled() -> bool:
+        """Topic writes are an independent, default-off PAT capability."""
+        return os.getenv("ROCKETCHAT_TOPIC_SYNC", "false").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
     async def _sync_title_to_rc_topic(self, chat_id: str) -> None:
         """Sync Hermes session title to RC room topic for DMs/groups/channels.
@@ -374,6 +430,8 @@ class RocketchatAdapter(
         # Get the current RC topic
         data = await self._api_get("rooms.info", params={"roomId": chat_id})
         room = (data or {}).get("room") or {}
+        if not isinstance(room, dict) or room.get("_id") != chat_id:
+            return
         current_topic = (room.get("topic") or "").strip()
 
         # Only call the API if topics differ
@@ -404,7 +462,7 @@ class RocketchatAdapter(
         """
         data = await self._api_get("rooms.info", params={"roomId": chat_id})
         room = (data or {}).get("room") or {}
-        if not room:
+        if not isinstance(room, dict) or room.get("_id") != chat_id:
             return {"name": chat_id, "type": "channel"}
 
         raw_type = room.get("t")
@@ -464,10 +522,18 @@ class RocketchatAdapter(
             "chat.update",
             {"roomId": chat_id, "msgId": message_id, "text": formatted},
         )
-        if not data or not data.get("success"):
+        if not isinstance(data, dict) or data.get("success") is not True:
             return SendResult(success=False, error="Failed to edit message")
-        msg = data.get("message") or {}
-        return SendResult(success=True, message_id=msg.get("_id", message_id))
+        msg = data.get("message")
+        if (
+            not isinstance(msg, dict)
+            or msg.get("_id") != message_id
+            or msg.get("rid") != chat_id
+        ):
+            return SendResult(
+                success=False, error="Rocket.Chat returned an invalid message target"
+            )
+        return SendResult(success=True, message_id=message_id)
 
     def format_message(self, content: str) -> str:
         """Rocket.Chat renders Markdown natively and previews plain image

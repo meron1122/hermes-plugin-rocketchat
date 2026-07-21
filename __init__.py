@@ -30,6 +30,20 @@ Environment variables:
     ROCKETCHAT_REPLY_MODE       Channel/group replies: 'thread' or 'off' (default: off)
     ROCKETCHAT_REACTIONS        Add 👀/✅/❌ reactions to messages (default: true)
     ROCKETCHAT_AGENT_FILE_MAX_BYTES  Agent-tool upload guard (default: 100 MiB; 0 disables)
+    ROCKETCHAT_AGENT_FILE_UPLOADS   Enable agent-triggered local file uploads
+    ROCKETCHAT_AGENT_FILE_ALLOWED_ROOTS  Absolute upload roots (POSIX path separator)
+    ROCKETCHAT_AGENT_FILE_MAX_CONCURRENCY  Concurrent file operations (default: 1)
+    ROCKETCHAT_AGENT_WRITE_TOOLS     Enable mutating agent tools (default: false)
+    ROCKETCHAT_AGENT_WRITE_ALLOWED_ROOMS  Exact cross-room write allowlist
+    ROCKETCHAT_AGENT_WRITE_TRUSTED_USERS  Trusted privileged/cross-room writers
+    ROCKETCHAT_AGENT_TOOLS_ALLOW_EXTERNAL  Allow writes outside Rocket.Chat sessions
+    ROCKETCHAT_RETRIEVAL_ALLOWED_ROOMS  Exact cross-room/contextless read allowlist
+    ROCKETCHAT_RETRIEVAL_TRUSTED_USERS  Users allowed to use the cross-room allowlist
+    ROCKETCHAT_RETRIEVAL_ALLOW_CONTEXTLESS  Enable allowlisted contextless reads
+    ROCKETCHAT_THREAD_CONTEXT_MAX_CHARS  Inbound thread-context character budget
+    ROCKETCHAT_MEDIA_DOWNLOAD_MAX_BYTES  Network-media byte budget
+    ROCKETCHAT_FORWARDED_SLASH_COMMANDS  Exact RC-native command allowlist
+    ROCKETCHAT_TOPIC_SYNC             Enable room-topic writes (default: false)
 """
 
 from .adapter import RocketchatAdapter
@@ -42,22 +56,51 @@ from .helpers import (
     validate_config,
 )
 from .setup_wizard import interactive_setup
-from .tools import TOOLS
+from .tools import (
+    TOOLS,
+    file_uploads_enabled,
+    validate_tool_configuration,
+    write_tools_enabled,
+)
 
 __all__ = ["register", "RocketchatAdapter"]
 
 
+def _read_tool_requirements() -> bool:
+    """Read tools require valid credentials and a hardened server URL."""
+    return bool(check_requirements() and validate_tool_configuration())
+
+
+def _write_tool_requirements() -> bool:
+    """Mutating tools are absent unless the operator explicitly enables them."""
+    return bool(_read_tool_requirements() and write_tools_enabled())
+
+
+def _file_upload_requirements() -> bool:
+    """Uploads require the write grant plus their own scoped capability."""
+    return bool(_read_tool_requirements() and file_uploads_enabled())
+
+
 def register(ctx):
     """Plugin entry point: called by the Hermes plugin system."""
-    # Agent tools — land in the auto-generated ``hermes-rocketchat``
-    # toolset because their toolset name matches the platform name.
-    for tool_name, schema, handler, emoji in TOOLS:
+    # Keep read and write capabilities independently selectable.  Runtime
+    # guards in the handlers remain authoritative even if a caller obtains a
+    # handler reference or a stale tool definition.
+    for tool_name, schema, handler, emoji, toolset in TOOLS:
         ctx.register_tool(
             name=tool_name,
-            toolset="rocketchat",
+            toolset=toolset,
             schema=schema,
             handler=handler,
-            check_fn=check_requirements,
+            check_fn=(
+                _file_upload_requirements
+                if tool_name == "rocketchat_send_file"
+                else (
+                    _write_tool_requirements
+                    if toolset == "rocketchat_write"
+                    else _read_tool_requirements
+                )
+            ),
             is_async=True,
             emoji=emoji,
         )

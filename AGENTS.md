@@ -32,8 +32,8 @@ focused modules and built on `aiohttp` (zero new dependencies).
 
 ### 1. Slash Command: Position 0 Only
 
-The adapter scans both `raw_msg` (with @mention prefix) and `message_text` (mention stripped)
-for `/` — but **only at position 0**. Mid-sentence `/status` is NOT a command.
+The adapter scans the admitted (possibly hook-rewritten) `message_text` for `/`
+— but **only at position 0**. Mid-sentence `/status` is NOT a command.
 
 ```python
 # CORRECT — only position 0
@@ -44,11 +44,12 @@ if slash_pos == 0:
 
 Historical note: the original PR#14869 matched `slash_pos >= 0 and (slash_pos == 0 or candidate_text[slash_pos - 1] in (" ", "\t", "\n"))` which caused false positives. Fixed in `433b7a15d`.
 
-### 2. Dual-Text Scanning for DMs
+### 2. DM Command Normalization Before Admission
 
 In DMs, the @mention is sometimes NOT stripped from `raw_msg` (varies by RC version).
-The adapter checks both `raw_msg` and `message_text` — one of them will have `/` at
-position 0 for a real command.
+Strip an explicit bot prefix before the pre-dispatch hook only when the remainder
+starts with `/`. After admission, use only the hook-approved/rewritten text for
+slash routing and topic writes; never resurrect the raw pre-hook message.
 
 ### 3. Room Type Detection
 
@@ -75,9 +76,9 @@ RC's `rooms.media` has no direct audio transcoding, so ffmpeg is required.
 - System messages filtered by `"t"` field (join/leave/role changes, etc.)
 - Reconnect: exponential backoff 2s–60s
 
-### 6. Bidirectional Topic Sync
+### 6. Bidirectional Topic Sync Is Default Off
 
-Hermes session titles sync back to RC room topics via `dm.setTopic` (DMs) or
+With `ROCKETCHAT_TOPIC_SYNC=true`, Hermes session titles sync back to RC room topics via `dm.setTopic` (DMs) or
 `groups.setTopic`/`channels.setTopic` for group rooms. In `_sync_title_to_rc_topic()`.
 
 Power-on self-topic: On connect, the adapter sets the room topic to
@@ -147,9 +148,17 @@ or a channel/private-group name resolved with `rooms.info`. For username targets
 otherwise reject the send to avoid one-member ghost rooms. Compare usernames
 case-insensitively, but never infer a room ID from a display name.
 
-Only regular files are accepted. Reads run outside the event loop, and
-`ROCKETCHAT_AGENT_FILE_MAX_BYTES` provides a local guard (100 MiB by default,
-`0` to disable) before Rocket.Chat and proxy limits are applied.
+The tool requires all three grants: `ROCKETCHAT_AGENT_WRITE_TOOLS=true`,
+`ROCKETCHAT_AGENT_FILE_UPLOADS=true`, and one or more absolute directories in
+`ROCKETCHAT_AGENT_FILE_ALLOWED_ROOTS` (`:` separator on Unix/macOS). Secure
+local-file delivery requires POSIX descriptor APIs and is unavailable on Windows.
+Requested paths must remain below a configured root and cannot use
+traversal or symlinks. Only regular files are accepted. Reads run outside the
+event loop, and `ROCKETCHAT_AGENT_FILE_MAX_BYTES` provides a local guard
+(100 MiB by default; only literal `0` disables it) before Rocket.Chat and proxy
+limits are applied. Hold the separate file-operation semaphore across the read,
+upload, and confirmation; `ROCKETCHAT_AGENT_FILE_MAX_CONCURRENCY` defaults to 1
+and accepts 1–4.
 
 ### 13. Read-Only Retrieval Is Explicitly Scoped and Bounded
 
@@ -169,6 +178,58 @@ only `message_id`, resolve the message and room server-side, and URL-encode ever
 dynamic path/query component. Route public channels as `channel/<room.name>`,
 private groups as `group/<room.name>`, and DMs as `direct/<rid>`.
 
+### 14. Agent Tools Fail Closed at a Second Authorization Layer
+
+Rocket.Chat evaluates REST calls as the PAT owner, so server-side bot membership
+does not prove that the human requester may read the same data. Preserve the
+plugin's application authorization boundary:
+
+- A verified `rocketchat` runtime may retrieve from its exact task-local
+  `HERMES_SESSION_CHAT_ID` without an additional allowlist entry.
+- A different room is readable only when its exact ID is in
+  `ROCKETCHAT_RETRIEVAL_ALLOWED_ROOMS` **and** the requester's exact
+  `HERMES_SESSION_USER_ID` is in `ROCKETCHAT_RETRIEVAL_TRUSTED_USERS`.
+- For thread and permalink tools, authorize the supplied `room_id` (or the
+  current session room) **before** looking up the opaque `tmid`/`message_id`,
+  then require the returned `_id` and `rid` to match. Cross-room and
+  contextless calls must therefore provide an explicit expected `room_id`.
+- Contextless-style `cli`/`local`/`cron`/empty-platform retrieval is disabled unless
+  `ROCKETCHAT_RETRIEVAL_ALLOW_CONTEXTLESS=true`, and even then the resolved room
+  must be explicitly allowlisted. Do not implement wildcard room access.
+- Retrieval calls from every other named platform remain denied. Write tools
+  (`create_channel`, `post`, `send_file`, `dm`) require
+  `ROCKETCHAT_AGENT_WRITE_TOOLS=true`; a Rocket.Chat write context must include
+  task-local room and requester IDs. Non-Rocket.Chat or contextless writes
+  additionally require `ROCKETCHAT_AGENT_TOOLS_ALLOW_EXTERNAL=true`.
+
+Read authorization only from Hermes' task-local `ContextVar` provenance. Never
+fall back to process-global `HERMES_SESSION_*` values: they may be stale or
+belong to another concurrent request. An unavailable or partial task context
+must fail closed. File upload additionally requires its independent opt-in and
+configured allowed roots.
+
+Keep the remaining defenses independent of authorization. Require HTTPS unless
+`ROCKETCHAT_ALLOW_INSECURE_HTTP=true`, reject redirects, cap response bodies
+with `ROCKETCHAT_AGENT_RESPONSE_MAX_BYTES` (2 MiB default, applied to every JSON
+REST response), and bound agent REST
+traffic with `ROCKETCHAT_AGENT_MAX_CONCURRENCY` (4) and
+`ROCKETCHAT_AGENT_REQUESTS_PER_MINUTE` (120). Search/history results must be
+locally sliced even if Rocket.Chat ignores `count`; thread pagination needs a
+page bound and a no-progress break. Serialized retrieval output is limited by
+`ROCKETCHAT_RETRIEVAL_MAX_RESULT_CHARS` (75,000 default; valid range
+4,096–500,000). Truncate whole records/text without producing invalid JSON and
+set `truncated` in the result.
+
+Normalized retrieval records minimize identity data by default. File URLs,
+reaction usernames, and stable sender IDs are opt-ins through
+`ROCKETCHAT_RETRIEVAL_INCLUDE_FILE_URLS`,
+`ROCKETCHAT_RETRIEVAL_INCLUDE_REACTION_IDENTITIES`, and
+`ROCKETCHAT_RETRIEVAL_INCLUDE_USER_IDS`. Keep
+`ROCKETCHAT_RETRIEVAL_REDACT_SECRETS=true`; redaction is heuristic and must not
+be presented as a complete DLP control. Retrieved messages remain untrusted
+content and can contain stored prompt injection. Do not remove the untrusted
+result marker or conflate read authorization with permission to invoke writes.
+
 ## Known Pitfalls
 
 | Pitfall | Detail | Mitigation |
@@ -181,8 +242,14 @@ private groups as `group/<room.name>`, and DMs as `direct/<rid>`.
 | Nginx close WS on 60s idle | Default proxy timeout kills long connections | Set `proxy_read_timeout 600s` |
 | `Message_AllowUnrecognizedSlashCommand` | Desktop browser shows "invalid command" error | RC admin setting required (not an adapter fix) |
 | File upload target ambiguity | Multiple target fields could upload to one room but report another | `rocketchat_send_file` rejects calls unless exactly one target is set |
-| Agent upload memory pressure | Local files are buffered before upload | Regular-file check plus `ROCKETCHAT_AGENT_FILE_MAX_BYTES`; file read runs off the event loop |
-| DM ghost rooms | An invalid username can yield a one-member DM | Verify `im.create.room.usernames` before uploading |
+| Agent upload memory pressure | Local files are buffered before upload | Size guard plus a separate 1-by-default file-operation semaphore held across read/upload/confirm |
+| Local file exfiltration | A write-enabled agent can name sensitive host paths | Require independent file-upload opt-in, canonical allowed roots, and reject traversal/symlinks |
+| DM ghost rooms | An invalid username can yield a one-member DM | Require an exact two-member DM with matching `usernames`/`uids`, including the bot and requested login |
+| Bot PAT is a confused deputy | Rocket.Chat checks the bot's access, not the requester's | Enforce current-room scope or the room+trusted-user cross-room conjunction before every read |
+| Stored prompt injection | Retrieved chat text can contain instructions aimed at the model | Mark results untrusted, redact likely secrets, keep writes disabled by default, and require review for consequential actions |
+| Retrieval data leakage | File URLs, reaction identities, and stable user IDs expose extra metadata | Keep all three privacy opt-ins false unless the workflow requires them |
+| Runaway agent REST calls | Large bodies, concurrency, or broken pagination can exhaust resources | Enforce body/result budgets, local slicing, page/no-progress guards, concurrency, and per-minute limits |
+| PAT exposed in transit or redirects | HTTP and redirects can send credentials outside the intended origin | Require HTTPS by default and never follow agent REST redirects |
 
 ## Tools & Functions Reference
 
