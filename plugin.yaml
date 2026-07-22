@@ -69,7 +69,7 @@ optional_env:
     prompt: "Enable agent file uploads? (true/false)"
     password: false
   - name: ROCKETCHAT_AGENT_FILE_ALLOWED_ROOTS
-    description: "Absolute directories from which agent tools may upload files, separated by the operating-system path separator"
+    description: "Absolute POSIX directories from which agent tools may upload files, separated by ':'; unavailable on Windows"
     prompt: "Allowed agent file upload roots"
     password: false
   - name: ROCKETCHAT_AGENT_FILE_MAX_CONCURRENCY
