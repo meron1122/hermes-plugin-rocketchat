@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import stat
 import threading
 import time
@@ -32,6 +33,7 @@ from tools.registry import tool_error, tool_result
 
 from .helpers import (
     ApiResponseTooLarge,
+    build_delegation_envelope,
     is_valid_url_path_identifier,
     read_bounded_json_response,
     validate_auth_config,
@@ -1963,12 +1965,14 @@ async def handle_send_file(args: dict, **kw: Any) -> str:
     )
 
 
-@_completion_audited("rocketchat_dm")
-async def handle_dm(args: dict, **kw: Any) -> str:
-    guard = _guard_write_tool("rocketchat_dm")
+async def _handle_dm_request(
+    args: dict, *, tool: str, delegation: bool
+) -> str:
+    """Open one verified DM and optionally send a one-shot delegation."""
+    guard = _guard_write_tool(tool)
     if guard:
         return tool_error(guard)
-    scope_error = _authorize_write_scope("rocketchat_dm", privileged=True)
+    scope_error = _authorize_write_scope(tool, privileged=True)
     if scope_error:
         return tool_error(scope_error)
     username, error = _strict_string(args, "username", required=True, maximum=255)
@@ -1978,7 +1982,11 @@ async def handle_dm(args: dict, **kw: Any) -> str:
     if not username:
         return tool_error("username must contain a Rocket.Chat login")
     message, error = _strict_string(
-        args, "message", maximum=MAX_TEXT_CHARS, allow_newlines=True
+        args,
+        "message",
+        required=delegation,
+        maximum=MAX_TEXT_CHARS - 80 if delegation else MAX_TEXT_CHARS,
+        allow_newlines=True,
     )
     if error:
         return tool_error(error)
@@ -1997,7 +2005,17 @@ async def handle_dm(args: dict, **kw: Any) -> str:
             sent=False,
             hint=f"DM room is open; cron delivery target is rocketchat:{room_id}",
         )
-    sent = await _api("POST", "chat.postMessage", payload={"roomId": room_id, "text": message})
+    delegation_id = secrets.token_hex(16) if delegation else None
+    outbound_text = (
+        build_delegation_envelope("task", delegation_id, message)
+        if delegation_id is not None
+        else message
+    )
+    sent = await _api(
+        "POST",
+        "chat.postMessage",
+        payload={"roomId": room_id, "text": outbound_text},
+    )
     if not isinstance(sent, dict):
         return tool_error("Rocket.Chat DM send returned an invalid response")
     if "_error" in sent:
@@ -2008,11 +2026,29 @@ async def handle_dm(args: dict, **kw: Any) -> str:
     message_id = sent_message.get("_id")
     if not _valid_server_identifier(message_id) or sent_message.get("rid") != room_id:
         return tool_error("Rocket.Chat DM send returned an invalid message target")
-    return tool_result(
-        room_id=room_id,
-        username=username,
-        sent=True,
-        message_id=message_id,
+    result = {
+        "room_id": room_id,
+        "username": username,
+        "sent": True,
+        "message_id": message_id,
+    }
+    if delegation_id is not None:
+        result["delegation_id"] = delegation_id
+        result["terminal_reply"] = True
+    return tool_result(**result)
+
+
+@_completion_audited("rocketchat_dm")
+async def handle_dm(args: dict, **kw: Any) -> str:
+    return await _handle_dm_request(
+        args, tool="rocketchat_dm", delegation=False
+    )
+
+
+@_completion_audited("rocketchat_delegate")
+async def handle_delegate(args: dict, **kw: Any) -> str:
+    return await _handle_dm_request(
+        args, tool="rocketchat_delegate", delegation=True
     )
 
 
@@ -2120,12 +2156,28 @@ SEND_FILE_SCHEMA = _schema(
 )
 DM_SCHEMA = _schema(
     "rocketchat_dm",
-    "Open/send a Rocket.Chat DM. Disabled unless write tools are explicitly enabled.",
+    "Open/send a Rocket.Chat DM to a person. Use rocketchat_delegate instead for another agent.",
     {
         "username": {"type": "string", "minLength": 1, "maxLength": 255},
         "message": {"type": "string", "maxLength": MAX_TEXT_CHARS},
     },
     ["username"],
+)
+DELEGATE_SCHEMA = _schema(
+    "rocketchat_delegate",
+    (
+        "Delegate one task to another Rocket.Chat agent. Its replies are "
+        "terminal results and never start a reply loop."
+    ),
+    {
+        "username": {"type": "string", "minLength": 1, "maxLength": 255},
+        "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_TEXT_CHARS - 80,
+        },
+    },
+    ["username", "message"],
 )
 
 
@@ -2140,4 +2192,5 @@ TOOLS = (
     ("rocketchat_post", POST_SCHEMA, handle_post, "📣", "rocketchat_write"),
     ("rocketchat_send_file", SEND_FILE_SCHEMA, handle_send_file, "📎", "rocketchat_write"),
     ("rocketchat_dm", DM_SCHEMA, handle_dm, "✉️", "rocketchat_write"),
+    ("rocketchat_delegate", DELEGATE_SCHEMA, handle_delegate, "🔀", "rocketchat_write"),
 )

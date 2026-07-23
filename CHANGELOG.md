@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.4.0] - 2026-07-23
+
+### Added
+
+- `rocketchat_delegate` for one-shot bot-to-bot task delegation over DM.
+- Versioned task/result envelopes with random delegation IDs.
+- `ROCKETCHAT_BOT_PEERS` as a compatibility fallback for Rocket.Chat servers
+  that omit bot metadata from message events.
+
+### Security
+
+- Terminal delegation results are dropped before authorization, attachment
+  processing, or agent dispatch, preventing recursive DM conversations.
+- Ordinary bot-generated messages are ignored unless they are explicit
+  delegation tasks. Human access can remain open without maintaining a human
+  user allowlist.
+- Text, edited, and media responses in delegated DM rooms all preserve terminal
+  result semantics.
+
 ## [1.3.0] - 2026-07-22
 
 ### Added
@@ -94,5 +113,6 @@
 Thanks to [@YounesAmalou](https://github.com/YounesAmalou) for the original
 implementation in [PR #1](https://github.com/HalfbitStudio/hermes-plugin-rocketchat/pull/1).
 
+[1.4.0]: https://github.com/HalfbitStudio/hermes-plugin-rocketchat/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/HalfbitStudio/hermes-plugin-rocketchat/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/HalfbitStudio/hermes-plugin-rocketchat/compare/v1.1.1...v1.2.0

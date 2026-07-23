@@ -23,6 +23,7 @@ from .helpers import (
     is_valid_server_identifier,
     is_valid_url_path_identifier,
     media_download_max_bytes,
+    parse_delegation_envelope,
     read_bounded_response_bytes,
     validate_auth_config,
 )
@@ -85,9 +86,11 @@ def _audit_inbound_write(
     *, action: str, outcome: str, room_id: Any, user_id: Any, command: str = ""
 ) -> None:
     """Emit a content-free audit record for PAT-powered inbound writes."""
-    fingerprint = lambda value: hashlib.sha256(
-        str(value or "").encode("utf-8", errors="replace")
-    ).hexdigest()[:16]
+    def fingerprint(value: Any) -> str:
+        return hashlib.sha256(
+            str(value or "").encode("utf-8", errors="replace")
+        ).hexdigest()[:16]
+
     logger.info(
         "rocketchat_inbound_write_audit %s",
         json.dumps(
@@ -139,6 +142,34 @@ def _sender_display_name(sender: Dict[str, Any]) -> str:
             if cleaned:
                 return cleaned
     return ""
+
+
+def _sender_is_bot_peer(post: Dict[str, Any], sender: Dict[str, Any]) -> bool:
+    """Identify automated peers without requiring a human-user allowlist."""
+    if post.get("bot") is True:
+        return True
+    sender_type = sender.get("type")
+    if isinstance(sender_type, str) and sender_type.casefold() in {"bot", "app"}:
+        return True
+    roles = sender.get("roles")
+    if isinstance(roles, (list, tuple)) and any(
+        isinstance(role, str) and role.casefold() == "bot"
+        for role in roles
+    ):
+        return True
+
+    sender_id = sender.get("_id")
+    username = sender.get("username")
+    username_folded = username.casefold() if isinstance(username, str) else ""
+    for configured in os.getenv("ROCKETCHAT_BOT_PEERS", "").split(","):
+        peer = configured.strip()
+        if not peer or peer == "*":
+            continue
+        if peer == sender_id:
+            return True
+        if peer.lstrip("@").casefold() == username_folded:
+            return True
+    return False
 
 
 def _sanitize_inbound_message(value: Any) -> str:
@@ -349,6 +380,30 @@ class InboundMixin:
         if not isinstance(raw_message_text, str):
             return
         message_text = _sanitize_inbound_message(raw_message_text)
+        delegation_kind, delegation_id, delegation_body = (
+            parse_delegation_envelope(message_text)
+        )
+        if delegation_kind is not None and chat_type != "dm":
+            # Delegation envelopes are intentionally DM-only. In channels they
+            # remain ordinary visible text and gain no special behavior.
+            delegation_kind = None
+            delegation_id = None
+        if delegation_kind == "result":
+            logger.info(
+                "Rocket.Chat: ignored terminal delegation result in room=%s",
+                room_id,
+            )
+            return
+        elif delegation_kind == "task":
+            if not delegation_body.strip() or delegation_id is None:
+                return
+            message_text = delegation_body
+        elif _sender_is_bot_peer(post, sender):
+            logger.info(
+                "Rocket.Chat: ignored non-delegation message from bot peer"
+            )
+            return
+
         physical_thread_id = post.get("tmid") or None
         if physical_thread_id is not None and not is_valid_server_identifier(
             physical_thread_id
@@ -463,6 +518,8 @@ class InboundMixin:
             logger.warning("Dropping non-admitted Rocket.Chat message before effects")
             return
         message_text = admitted.text
+        if delegation_kind == "task" and delegation_id is not None:
+            self._remember_delegation_task(room_id, delegation_id)
 
         # Route RC-native slash commands back to Rocket.Chat.  Only the admitted
         # (and possibly hook-rewritten) text is authoritative here.

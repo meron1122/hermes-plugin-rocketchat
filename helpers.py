@@ -55,6 +55,32 @@ _DDP_PROTOCOL_VERSION = "1"
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _PERCENT_ESCAPE_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+_DELEGATION_ENVELOPE_RE = re.compile(
+    r"\A\[hermes-delegation:v1:(task|result):([0-9a-f]{32})\](?:\r?\n)?"
+)
+
+
+def build_delegation_envelope(kind: str, delegation_id: str, text: str) -> str:
+    """Build a bounded, machine-readable one-shot bot delegation message."""
+    if kind not in {"task", "result"}:
+        raise ValueError("invalid delegation kind")
+    if not re.fullmatch(r"[0-9a-f]{32}", delegation_id):
+        raise ValueError("invalid delegation id")
+    if not isinstance(text, str):
+        raise TypeError("invalid delegation text")
+    return f"[hermes-delegation:v1:{kind}:{delegation_id}]\n{text}"
+
+
+def parse_delegation_envelope(
+    text: Any,
+) -> tuple[Optional[str], Optional[str], str]:
+    """Return ``(kind, id, body)`` without treating ordinary text as protocol."""
+    if not isinstance(text, str):
+        return None, None, ""
+    match = _DELEGATION_ENVELOPE_RE.match(text)
+    if match is None:
+        return None, None, text
+    return match.group(1), match.group(2), text[match.end():]
 
 
 def _env_flag(name: str, *, default: bool = False) -> bool:

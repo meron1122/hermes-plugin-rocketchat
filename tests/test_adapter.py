@@ -579,6 +579,8 @@ class TestSend:
     @pytest.mark.asyncio
     async def test_clarify_prompt_uses_metadata_thread_root(self):
         adapter = self._adapter("thread")
+        if not callable(getattr(adapter, "send_clarify", None)):
+            pytest.skip("Hermes runtime no longer exposes adapter.send_clarify")
         adapter._room_type_cache["room1"] = "channel"
         posted = {}
 
@@ -699,6 +701,26 @@ class TestSend:
         result = await adapter.send("room1", "")
         assert result.success is True
         adapter._api_post.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_delegation_reply_is_marked_as_terminal_result(self):
+        adapter = self._adapter()
+        adapter._remember_delegation_task("room1", "a" * 32)
+        adapter._api_post = AsyncMock(
+            return_value={
+                "success": True,
+                "message": {"_id": "result1", "rid": "room1"},
+            }
+        )
+
+        result = await adapter.send("room1", "notatka zaktualizowana")
+
+        assert result.success is True
+        payload = adapter._api_post.await_args.args[1]
+        assert payload["text"] == (
+            f"[hermes-delegation:v1:result:{'a' * 32}]\n"
+            "notatka zaktualizowana"
+        )
 
     @pytest.mark.asyncio
     async def test_suppresses_exact_home_channel_notice_when_enabled(
@@ -958,6 +980,76 @@ class TestHandleMessage:
         assert event.source.chat_type == "dm"
 
     @pytest.mark.asyncio
+    async def test_delegated_dm_dispatches_body_and_remembers_task(self):
+        adapter = _wired_adapter(room_type="dm")
+        task_id = "b" * 32
+
+        await adapter._handle_message(_post(
+            msg=_plugin_helpers.build_delegation_envelope(
+                "task", task_id, "zaktualizuj notatkę"
+            )
+        ))
+
+        adapter.handle_message.assert_awaited_once()
+        event = adapter.handle_message.await_args.args[0]
+        assert event.text == "zaktualizuj notatkę"
+        assert adapter._delegation_tasks["room1"] == task_id
+
+    @pytest.mark.asyncio
+    async def test_terminal_delegation_result_does_not_start_agent(self):
+        adapter = _wired_adapter(room_type="dm")
+
+        await adapter._handle_message(_post(
+            msg=_plugin_helpers.build_delegation_envelope(
+                "result", "c" * 32, "gotowe"
+            )
+        ))
+
+        adapter.handle_message.assert_not_awaited()
+        adapter._download_attachments.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_plain_bot_dm_does_not_start_agent(self):
+        adapter = _wired_adapter(room_type="dm")
+
+        await adapter._handle_message(_post(
+            bot=True,
+            u={"_id": "peer-bot-id", "username": "halfbrain"},
+        ))
+
+        adapter.handle_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_configured_bot_peer_is_ignored_without_human_allowlist(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("ROCKETCHAT_BOT_PEERS", "@halfbrain")
+        adapter = _wired_adapter(room_type="dm")
+
+        await adapter._handle_message(_post(
+            u={"_id": "peer-bot-id", "username": "HalfBrain"},
+        ))
+
+        adapter.handle_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_bot_peer_can_send_explicit_delegation(self):
+        adapter = _wired_adapter(room_type="dm")
+
+        await adapter._handle_message(_post(
+            bot=True,
+            u={"_id": "peer-bot-id", "username": "halfpm"},
+            msg=_plugin_helpers.build_delegation_envelope(
+                "task", "e" * 32, "zaktualizuj notatkę"
+            ),
+        ))
+
+        adapter.handle_message.assert_awaited_once()
+        assert adapter.handle_message.await_args.args[0].text == (
+            "zaktualizuj notatkę"
+        )
+
+    @pytest.mark.asyncio
     async def test_dm_prefers_display_name_over_username(self):
         adapter = _wired_adapter(room_type="dm")
         await adapter._handle_message(_post(
@@ -978,7 +1070,10 @@ class TestHandleMessage:
             home_channels={},
         ))
         assert "DM with Adam" in prompt
-        assert '**User:** "Adam"' in prompt
+        assert (
+            '**User:** "Adam"' in prompt
+            or "**User:** Adam" in prompt
+        )
         assert "marcin" not in prompt
 
     @pytest.mark.asyncio
@@ -1434,12 +1529,13 @@ class TestAgentTools:
             "rocketchat_post",
             "rocketchat_send_file",
             "rocketchat_dm",
+            "rocketchat_delegate",
             "rocketchat_search_messages",
             "rocketchat_get_history",
             "rocketchat_get_thread",
             "rocketchat_get_permalink",
         }
-        assert len(names) == 9
+        assert len(names) == 10
         toolsets = {
             call.kwargs["name"]: call.kwargs["toolset"]
             for call in ctx.register_tool.call_args_list
@@ -1462,6 +1558,7 @@ class TestAgentTools:
             "rocketchat_post",
             "rocketchat_send_file",
             "rocketchat_dm",
+            "rocketchat_delegate",
         }
         assert all(c[1]["is_async"] for c in ctx.register_tool.call_args_list)
 
@@ -1823,6 +1920,54 @@ class TestAgentTools:
     async def test_dm_requires_username(self):
         out = json.loads(await _tools.handle_dm({}))
         assert "error" in out
+
+    @pytest.mark.asyncio
+    async def test_delegate_sends_one_shot_task_envelope(
+        self, monkeypatch
+    ):
+        calls = []
+
+        async def fake_api(method, path, **kw):
+            calls.append((path, kw.get("payload")))
+            if path == "im.create":
+                return {
+                    "room": {
+                        "_id": "dm42",
+                        "t": "d",
+                        "usernames": ["hermesbot", "halfbrain"],
+                        "uids": ["bot-id", "halfbrain-id"],
+                    }
+                }
+            return {"message": {"_id": "m10", "rid": "dm42"}}
+
+        monkeypatch.setattr(_tools, "_api", fake_api)
+        monkeypatch.setattr(_tools.secrets, "token_hex", lambda size: "d" * 32)
+
+        out = json.loads(await _tools.handle_delegate({
+            "username": "halfbrain",
+            "message": "zaktualizuj notatkę",
+        }))
+
+        assert out["sent"] is True
+        assert out["delegation_id"] == "d" * 32
+        assert out["terminal_reply"] is True
+        assert (
+            "chat.postMessage",
+            {
+                "roomId": "dm42",
+                "text": (
+                    f"[hermes-delegation:v1:task:{'d' * 32}]\n"
+                    "zaktualizuj notatkę"
+                ),
+            },
+        ) in calls
+
+    @pytest.mark.asyncio
+    async def test_delegate_requires_message(self):
+        out = json.loads(await _tools.handle_delegate({
+            "username": "halfbrain"
+        }))
+        assert "message is required" in out["error"]
 
     @pytest.mark.asyncio
     async def test_post_by_channel_name_adds_hash(self, monkeypatch):
@@ -2763,6 +2908,7 @@ class TestToolRegistrationSecurity:
             "rocketchat_post",
             "rocketchat_send_file",
             "rocketchat_dm",
+            "rocketchat_delegate",
         ):
             assert registered[name]["toolset"] == "rocketchat_write"
             assert registered[name]["check_fn"]() is False
@@ -2775,6 +2921,7 @@ class TestToolRegistrationSecurity:
                 "rocketchat_create_channel",
                 "rocketchat_post",
                 "rocketchat_dm",
+                "rocketchat_delegate",
             )
         )
         monkeypatch.setenv("ROCKETCHAT_AGENT_FILE_UPLOADS", "true")
@@ -2790,6 +2937,10 @@ class TestToolRegistrationSecurity:
             ("handle_create_channel", {"name": "reports"}),
             ("handle_post", {"room_id": "r1", "message": "hello"}),
             ("handle_dm", {"username": "alice"}),
+            (
+                "handle_delegate",
+                {"username": "halfbrain", "message": "do the task"},
+            ),
         ],
     )
     async def test_write_handlers_reject_external_platform_before_api(

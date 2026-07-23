@@ -230,6 +230,22 @@ be presented as a complete DLP control. Retrieved messages remain untrusted
 content and can contain stored prompt injection. Do not remove the untrusted
 result marker or conflate read authorization with permission to invoke writes.
 
+### 15. Bot-to-Bot Delegation Is One-Shot
+
+Use `rocketchat_delegate`, not `rocketchat_dm`, when one Hermes agent assigns a
+task to another. The tool sends a versioned task envelope with a random
+`delegation_id`. Inbound handling strips an admitted task envelope before agent
+dispatch and remembers its DM room. Interactive text, edits, and media sent back
+to that room carry a terminal result envelope; receiving a result never starts
+an agent turn.
+
+Ordinary bot-generated messages are rejected unless they are a valid task
+envelope. Detect Rocket.Chat's message `bot` flag and sender `type`/`roles`;
+`ROCKETCHAT_BOT_PEERS` is the compatibility fallback for servers that omit
+those fields. This fallback lists bot IDs or usernames only, so human access may
+remain open through `ROCKETCHAT_ALLOW_ALL_USERS=true`. Delegation envelopes
+have special meaning only in DMs.
+
 ## Known Pitfalls
 
 | Pitfall | Detail | Mitigation |
@@ -270,7 +286,7 @@ result marker or conflate read authorization with permission to invoke writes.
 
 **Agent tools:**
 - `tools.py`: `handle_list_channels()`, `handle_create_channel()`, `handle_post()`,
-  `handle_send_file()`, `handle_dm()`, `handle_search_messages()`,
+  `handle_send_file()`, `handle_dm()`, `handle_delegate()`, `handle_search_messages()`,
   `handle_get_history()`, `handle_get_thread()`, `handle_get_permalink()`
 
 **Reactions:**

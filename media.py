@@ -171,8 +171,11 @@ class MediaMixin:
             f"{quote(str(file_id), safe='')}"
         )
         payload: Dict[str, Any] = {}
-        if caption:
-            payload["msg"] = caption
+        outbound_caption = self._decorate_delegation_result(
+            room_id, caption or ""
+        )
+        if outbound_caption:
+            payload["msg"] = outbound_caption
         thread_target = await self._thread_target_for_reply(
             room_id, tmid, metadata
         )

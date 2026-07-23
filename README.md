@@ -144,6 +144,7 @@ The adapter reconnects automatically (exponential backoff 2–60s), but a too-ag
 | `ROCKETCHAT_USER_ID` | ✅ | — | Bot user `_id` |
 | `ROCKETCHAT_ALLOWED_USERS` | — | `""` | Comma-separated list of allowed user IDs |
 | `ROCKETCHAT_ALLOW_ALL_USERS` | — | `false` | Allow all users (dev only) |
+| `ROCKETCHAT_BOT_PEERS` | — | `""` | Comma-separated bot usernames or IDs used when Rocket.Chat omits bot metadata; ordinary messages from these peers are ignored, while explicit delegations are accepted |
 | `ROCKETCHAT_HOME_CHANNEL` | — | — | Room ID for cron / notification delivery |
 | `ROCKETCHAT_SUPPRESS_HOME_CHANNEL_NOTICE` | — | `false` | Suppress the one-time `/sethome` notice when no home channel is configured |
 | `ROCKETCHAT_REQUIRE_MENTION` | — | `true` | Require @mention to trigger in channels |
@@ -280,16 +281,16 @@ not replace least privilege at the server.
 | Setup wizard | ✅ `hermes gateway setup` |
 | Plugin discovery | ✅ Auto-discover via `kind: platform` |
 | Thread context | ✅ First mention in a thread pulls in prior thread messages |
-| Agent tools | ✅ Nine tools for room management, posting, uploads, DMs, search, history, threads, and permalinks (see below) |
+| Agent tools | ✅ Ten tools for room management, posting, uploads, DMs, one-shot delegation, search, history, threads, and permalinks (see below) |
 
 ---
 
 ## Agent Tools
 
-The plugin registers nine Rocket.Chat tools, divided into read and write
+The plugin registers ten Rocket.Chat tools, divided into read and write
 capabilities. `rocketchat_list_channels` and the four retrieval tools are read
 tools. `rocketchat_create_channel`, `rocketchat_post`, `rocketchat_send_file`,
-and `rocketchat_dm` are write tools and fail closed unless
+`rocketchat_dm`, and `rocketchat_delegate` are write tools and fail closed unless
 `ROCKETCHAT_AGENT_WRITE_TOOLS=true`. File upload additionally requires
 `ROCKETCHAT_AGENT_FILE_UPLOADS=true` and an allowed root. Every call is also checked against the
 runtime platform/session policy described under
@@ -302,6 +303,7 @@ runtime platform/session policy described under
 | `rocketchat_post` | Publish a result or hand-off to another room | `message` plus `channel` or exact `room_id` | bot must be a room member and able to post |
 | `rocketchat_send_file` | Deliver a report, export, or generated artifact | `file_path` plus exactly one of `room_id`, `username`, `channel`; optional `caption`, `file_name`, `tmid` | bot must be able to post and upload files in the target room |
 | `rocketchat_dm` | Open a private workflow or schedule a direct reminder | `username`; optional `message` | bot must be allowed to create/open DMs with the user |
+| `rocketchat_delegate` | Send one task to another Hermes agent without starting a bot-to-bot reply loop | `username`, `message`; returns a `delegation_id` | bot must be allowed to create/open DMs with the peer agent |
 | `rocketchat_search_messages` | Find decisions, incidents, owners, or prior discussion inside one known room | `room_id`, `query`; `count` defaults to 25 (valid 1–100); `offset` defaults to 0 and must be non-negative | bot must be a room member with access to search/read its messages |
 | `rocketchat_get_history` | Summarize or audit a bounded slice of one room's timeline | `room_id`; `count` defaults to 50 (valid 1–100); `offset` defaults to 0 and must be non-negative; optional `oldest`, `latest`, `inclusive`; `include_threads` defaults to false | bot must be a room member with access to its history |
 | `rocketchat_get_thread` | Reconstruct a discussion before summarizing or acting on it | `tmid`; optional expected `room_id` (required cross-room/contextless); `limit` defaults to 100 (valid 1–500) | bot must be able to read the parent message and its room |
@@ -312,6 +314,26 @@ Combined with the built-in `cronjob` tool this enables natural flows like:
 > *"hey, remind @zed about the deploy tomorrow at 9 — in a DM"*
 
 The agent opens @zed's DM room via `rocketchat_dm` (which returns the `room_id`) and schedules a cron job with `deliver="rocketchat:<room_id>"`, so the reminder lands in the DM even if the gateway restarted in between.
+
+### Loop-safe bot delegation
+
+Use `rocketchat_delegate`, not `rocketchat_dm`, when the target username belongs
+to another Hermes agent. The tool wraps the request in a versioned task envelope.
+The receiving adapter strips the envelope, runs the task once, and marks every
+text, edited, or media response in that DM as a terminal result. Terminal results
+are dropped before agent dispatch, so they cannot produce another reply.
+
+Ordinary messages identified by Rocket.Chat as bot-generated are ignored unless
+they contain a valid delegation task. Rocket.Chat versions that omit bot metadata
+can set `ROCKETCHAT_BOT_PEERS` to the peer bot usernames or IDs. This list
+contains only bot identities; `ROCKETCHAT_ALLOW_ALL_USERS=true` can still keep
+the gateway open to human users.
+
+> *"Ask @halfbrain to update the project note."*
+
+The calling agent uses `rocketchat_delegate`. `@halfbrain` executes the request
+and may post a result in the shared DM, but the calling agent does not treat that
+result as a new instruction.
 
 > *"research this thread and post the summary to #reports"*
 

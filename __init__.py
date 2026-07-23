@@ -23,6 +23,7 @@ Environment variables:
     ROCKETCHAT_USER_ID          Bot user's _id (shown alongside the PAT)
     ROCKETCHAT_ALLOWED_USERS    Comma-separated user IDs
     ROCKETCHAT_ALLOW_ALL_USERS  Allow all users (dev only)
+    ROCKETCHAT_BOT_PEERS        Peer bot usernames/IDs (ordinary DMs ignored)
     ROCKETCHAT_HOME_CHANNEL     Room ID for cron/notification delivery
     ROCKETCHAT_SUPPRESS_HOME_CHANNEL_NOTICE  Hide missing-home-channel notice
     ROCKETCHAT_REQUIRE_MENTION  Require @mention in channels (default: true)
@@ -129,6 +130,8 @@ def register(ctx):
             "In channels, users must @mention you for the bot to respond (unless the room "
             "is in the free-response list). Channel/group replies can be threaded "
             "(ROCKETCHAT_REPLY_MODE); DM replies always stay flat. "
+            "For bot-to-bot tasks, always use rocketchat_delegate instead of "
+            "rocketchat_dm so the result cannot start a reply loop. "
             "Keep responses clear and concise."
         ),
     )

@@ -1,7 +1,7 @@
 name: rocketchat-platform
 label: Rocket.Chat
 kind: platform
-version: 1.3.0
+version: 1.4.0
 description: >
   Rocket.Chat gateway adapter for Hermes Agent.
   Connects to a self-hosted Rocket.Chat instance via the REST API v1 for
@@ -14,6 +14,7 @@ provides_tools:
   - rocketchat_post
   - rocketchat_send_file
   - rocketchat_dm
+  - rocketchat_delegate
   - rocketchat_search_messages
   - rocketchat_get_history
   - rocketchat_get_thread
@@ -39,6 +40,10 @@ optional_env:
   - name: ROCKETCHAT_ALLOW_ALL_USERS
     description: "Allow all users to talk to the bot (dev only)"
     prompt: "Allow all users? (true/false)"
+    password: false
+  - name: ROCKETCHAT_BOT_PEERS
+    description: "Bot usernames or IDs whose ordinary messages are ignored; explicit rocketchat_delegate tasks remain allowed"
+    prompt: "Peer bot usernames/IDs (comma-separated)"
     password: false
   - name: ROCKETCHAT_HOME_CHANNEL
     description: "Room ID for cron / notification delivery"

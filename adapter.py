@@ -11,6 +11,7 @@ import asyncio
 import logging
 import os
 import re
+from collections import OrderedDict
 from typing import Any, Dict, Optional
 
 from gateway.config import Platform
@@ -21,6 +22,7 @@ from .ddp import DdpTransportMixin
 from .helpers import (
     MAX_MESSAGE_LENGTH,
     _ROOM_TYPE_MAP,
+    build_delegation_envelope,
     is_valid_server_identifier,
     read_bounded_json_response,
     validate_auth_config,
@@ -37,6 +39,7 @@ _HERMES_HOME_CHANNEL_NOTICE = (
     "Type /sethome to make this chat your home channel, "
     "or ignore to skip."
 )
+_MAX_ACTIVE_DELEGATION_ROOMS = 256
 
 
 class RocketchatAdapter(
@@ -100,9 +103,35 @@ class RocketchatAdapter(
         # Dedup cache.
         self._dedup = MessageDeduplicator()
 
+        # One-shot bot-to-bot tasks. Replies in these DM rooms carry a
+        # terminal result envelope so they cannot start another agent turn.
+        self._delegation_tasks: OrderedDict[str, str] = OrderedDict()
+
         # Title→topic sync state: rate-limit and last-known topic per room.
         self._last_topic_sync: Dict[str, float] = {}  # room_id → timestamp
         self._last_topic: Dict[str, str] = {}  # room_id → last known topic
+
+    def _remember_delegation_task(
+        self, room_id: str, delegation_id: str
+    ) -> None:
+        """Remember a bounded number of DM rooms awaiting terminal results."""
+        if (
+            not is_valid_server_identifier(room_id)
+            or not re.fullmatch(r"[0-9a-f]{32}", delegation_id)
+        ):
+            return
+        self._delegation_tasks[room_id] = delegation_id
+        self._delegation_tasks.move_to_end(room_id)
+        while len(self._delegation_tasks) > _MAX_ACTIVE_DELEGATION_ROOMS:
+            self._delegation_tasks.popitem(last=False)
+
+    def _decorate_delegation_result(self, room_id: str, content: str) -> str:
+        """Mark a delegated-task reply as terminal, non-conversational data."""
+        delegation_id = self._delegation_tasks.get(room_id)
+        if not delegation_id:
+            return content
+        self._delegation_tasks.move_to_end(room_id)
+        return build_delegation_envelope("result", delegation_id, content)
 
     # ------------------------------------------------------------------
     # HTTP helpers
@@ -303,7 +332,21 @@ class RocketchatAdapter(
             return SendResult(success=True)
 
         formatted = self.format_message(content)
-        chunks = self.truncate_message(formatted, MAX_MESSAGE_LENGTH)
+        delegation_id = self._delegation_tasks.get(chat_id)
+        if delegation_id:
+            envelope_overhead = len(
+                build_delegation_envelope("result", delegation_id, "")
+            )
+            chunks = self.truncate_message(
+                formatted, MAX_MESSAGE_LENGTH - envelope_overhead
+            )
+            chunks = [
+                build_delegation_envelope("result", delegation_id, chunk)
+                for chunk in chunks
+            ]
+            self._delegation_tasks.move_to_end(chat_id)
+        else:
+            chunks = self.truncate_message(formatted, MAX_MESSAGE_LENGTH)
         thread_target = await self._thread_target_for_reply(
             chat_id, reply_to, metadata
         )
@@ -517,7 +560,9 @@ class RocketchatAdapter(
         self, chat_id: str, message_id: str, content: str, *, finalize: bool = False
     ) -> SendResult:
         """Edit an existing message via chat.update."""
-        formatted = self.format_message(content)
+        formatted = self._decorate_delegation_result(
+            chat_id, self.format_message(content)
+        )
         data = await self._api_post(
             "chat.update",
             {"roomId": chat_id, "msgId": message_id, "text": formatted},
